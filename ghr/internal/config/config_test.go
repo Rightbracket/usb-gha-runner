@@ -95,15 +95,48 @@ func TestEnvRoundTrip(t *testing.T) {
 }
 
 func TestRedactAndMerge(t *testing.T) {
-	old := &Config{Auth: Auth{Type: "pat", PAT: "secret"}}
+	old := &Config{URL: "https://github.com/acme/app", Auth: Auth{Type: "pat", PAT: "secret"}}
 	r := old.Redacted()
 	if r.Auth.PAT == "secret" || old.Auth.PAT != "secret" {
 		t.Fatal("redaction wrong")
 	}
-	in := &Config{Auth: Auth{Type: "pat", PAT: "********"}}
+	in := &Config{URL: "https://github.com/acme/other", Auth: Auth{Type: "pat", PAT: "********"}}
 	in.MergeSecrets(old)
 	if in.Auth.PAT != "secret" {
-		t.Fatal("placeholder should keep the stored secret")
+		t.Fatal("placeholder should keep the stored secret for the same host")
+	}
+}
+
+func TestMergeSecretsNotToAnotherHost(t *testing.T) {
+	old := &Config{URL: "https://github.com/acme", Auth: Auth{Type: "app", AppID: "1", PrivateKey: "KEY", PAT: "secret"}}
+	for name, in := range map[string]*Config{
+		"other host":  {URL: "https://evil.example/acme", Auth: Auth{Type: "app", AppID: "1"}},
+		"other type":  {URL: "https://github.com/acme", Auth: Auth{Type: "pat"}},
+		"other app":   {URL: "https://github.com/acme", Auth: Auth{Type: "app", AppID: "2"}},
+		"placeholder": {URL: "https://evil.example/acme", Auth: Auth{Type: "app", AppID: "1", PrivateKey: "********"}},
+	} {
+		in.MergeSecrets(old)
+		if in.Auth.PrivateKey != "" || in.Auth.PAT != "" {
+			t.Errorf("%s: reused a saved secret: %+v", name, in.Auth)
+		}
+	}
+}
+
+func TestTargetHTTPSOnly(t *testing.T) {
+	if _, err := (&Config{URL: "http://github.com/acme"}).Target(); err == nil {
+		t.Error("http URL accepted")
+	}
+	if _, err := (&Config{URL: "https://ghe.example.com/acme/app"}).Target(); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestRunnerBase(t *testing.T) {
+	if got := (&Config{}).RunnerBase("ghr-3f9a"); got != "ghr-3f9a" {
+		t.Error(got)
+	}
+	if got := (&Config{NamePrefix: "build"}).RunnerBase("ghr-3f9a"); got != "build-ghr-3f9a" {
+		t.Error(got)
 	}
 }
 

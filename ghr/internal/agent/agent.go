@@ -23,6 +23,7 @@ import (
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/gh"
+	"github.com/Rightbracket/usb-gha-runner/ghr/internal/importer"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/prune"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/sshctl"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/status"
@@ -48,6 +49,7 @@ type Agent struct {
 	cfgMu     sync.Mutex // serialises config writes
 	collector *status.Collector
 	version   string
+	sv        *supervisor.Supervisor
 }
 
 // Version returns the image release, used to tag the job image.
@@ -91,7 +93,11 @@ func Run(ctx context.Context) error {
 		Hostname:       host,
 		JobImage:       jobImage,
 		RegistryMirror: mirror,
+		// No jobs until someone owns the web page: otherwise a stick set up
+		// with only runner.env would leave /setup open to anything on the LAN.
+		Ready: func() bool { _, err := os.Stat(importer.PasswordFile); return err == nil },
 	}
+	a.sv = sv
 	go func() {
 		if err := sv.Run(ctx); err != nil {
 			log.Printf("supervisor: %v", err)
@@ -226,18 +232,19 @@ func (a *Agent) remove(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, err, 500)
 		return
 	}
+	// Let the slot loops see the drain and exit before deregistering, so none
+	// of them registers a fresh runner behind our back.
+	if a.sv != nil {
+		a.sv.StopAll(45 * time.Second)
+	}
 	stopSlots()
 	var errs []string
 	if cfg.Configured() {
 		if client, err := gh.New(cfg); err == nil {
 			host, _ := os.Hostname()
-			prefix := cfg.NamePrefix
-			if prefix == "" {
-				prefix = host
-			}
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
-			if n, err := client.DeleteRunnersWithPrefix(ctx, prefix+"-"); err != nil {
+			if n, err := client.DeleteSlotRunners(ctx, cfg.RunnerBase(host)); err != nil {
 				errs = append(errs, err.Error())
 			} else {
 				log.Printf("removed %d runner registrations", n)

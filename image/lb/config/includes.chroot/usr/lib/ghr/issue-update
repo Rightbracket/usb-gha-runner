@@ -25,6 +25,11 @@ mkdir -p /run/ghr
     echo
     echo "  ERROR setting up the data partition: $(cat /run/ghr/data-error)"
   fi
+  if [ -e /run/ghr/admin-password-error ]; then
+    echo
+    echo "  ERROR: ghr/admin-password on the stick couldn't be used, so setup is locked:"
+    echo "      $(cat /run/ghr/admin-password-error)"
+  fi
   if [ -e /run/ghr/stick-small ]; then
     echo
     echo "  Warning: this stick is smaller than the recommended 64 GB."

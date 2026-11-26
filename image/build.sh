@@ -17,7 +17,7 @@ gh_api() {
 }
 
 log "ghr binary"
-(cd "$root/ghr" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X github.com/Rightbracket/usb-gha-runner/ghr/internal/agent.MirrorImage=$REGISTRY_IMAGE" -o "$out/ghr" ./cmd/ghr)
+(cd "$root/ghr" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X github.com/Rightbracket/usb-gha-runner/ghr/internal/agent.MirrorImage=${REGISTRY_IMAGE%@*}" -o "$out/ghr" ./cmd/ghr)
 
 log "resolve versions"
 if [ "${RUNNER_VERSION}" = "latest" ] || [ -z "${RUNNER_VERSION}" ]; then
@@ -32,6 +32,27 @@ sysbox_url=$(gh_api "repos/nestybox/sysbox/releases/tags/v${SYSBOX_VERSION}" |
 echo "actions/runner $RUNNER_VERSION ($RUNNER_SHA256)"
 echo "sysbox $SYSBOX_VERSION from $sysbox_url"
 
+log "check pinned inputs"
+# Sysbox runs as root on the host, so its .deb must match the pinned hash.
+# The base images must be pinned by digest. On a mismatch or a missing pin
+# this prints what was fetched, to review and copy into versions.env.
+curl -fsSL -o "$out/sysbox.deb" "$sysbox_url"
+sysbox_sha=$(sha256sum "$out/sysbox.deb" | cut -d' ' -f1)
+pins_ok=true
+if [ "$sysbox_sha" != "${SYSBOX_SHA256:-}" ]; then
+  echo "sysbox .deb SHA-256 is $sysbox_sha, versions.env has '${SYSBOX_SHA256:-}'" >&2
+  pins_ok=false
+fi
+for v in JOB_BASE_IMAGE REGISTRY_IMAGE; do
+  ref=${!v}
+  if [[ $ref != *@sha256:* ]]; then
+    docker pull -q "$ref" >/dev/null
+    echo "$v=$ref is not pinned by digest; it currently resolves to $(docker image inspect -f '{{index .RepoDigests 0}}' "$ref")" >&2
+    pins_ok=false
+  fi
+done
+$pins_ok || exit 1
+
 log "job image"
 docker build --pull -t "ghr-job:$VERSION" \
   --build-arg JOB_BASE_IMAGE="$JOB_BASE_IMAGE" \
@@ -39,8 +60,10 @@ docker build --pull -t "ghr-job:$VERSION" \
   --build-arg RUNNER_SHA256="$RUNNER_SHA256" \
   --build-arg GHR_VERSION="$VERSION" \
   "$root/image/job"
+# Pulled by digest, saved under its plain tag, which is what ghr-agent runs.
 docker pull -q "$REGISTRY_IMAGE"
-docker save "ghr-job:$VERSION" "$REGISTRY_IMAGE" | zstd -T0 -10 -q -f -o "$out/ghr-images.tar.zst"
+docker tag "$REGISTRY_IMAGE" "${REGISTRY_IMAGE%@*}"
+docker save "ghr-job:$VERSION" "${REGISTRY_IMAGE%@*}" | zstd -T0 -10 -q -f -o "$out/ghr-images.tar.zst"
 ls -lh "$out/ghr-images.tar.zst"
 
 log "stage live-build config"
@@ -52,12 +75,7 @@ inc="$work/lb/config/includes.chroot"
 install -D -m 0755 "$out/ghr" "$inc/usr/local/bin/ghr"
 install -d "$inc/usr/share/ghr" "$inc/var/cache/ghr"
 echo "$VERSION" >"$inc/usr/share/ghr/version"
-curl -fsSL -o "$inc/var/cache/ghr/sysbox.deb" "$sysbox_url"
-sysbox_sha=$(sha256sum "$inc/var/cache/ghr/sysbox.deb" | cut -d' ' -f1)
-if [ -n "${SYSBOX_SHA256}" ] && [ "$SYSBOX_SHA256" != "$sysbox_sha" ]; then
-  echo "sysbox .deb SHA-256 is $sysbox_sha, expected $SYSBOX_SHA256" >&2
-  exit 1
-fi
+mv "$out/sysbox.deb" "$inc/var/cache/ghr/sysbox.deb"
 {
   echo "version=$VERSION"
   echo "debian=$DEBIAN_SUITE"

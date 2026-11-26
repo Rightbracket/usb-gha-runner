@@ -63,6 +63,9 @@ type Supervisor struct {
 	// RegistryMirror, when set, is passed to each job's inner dockerd as a
 	// pull-through mirror for Docker Hub (http://<docker0 ip>:5000).
 	RegistryMirror string
+	// Ready, when set, must report true before any slot starts. The agent
+	// uses it to keep jobs off the machine until an admin password exists.
+	Ready func() bool
 
 	mu    sync.Mutex
 	slots map[int]*slot
@@ -91,18 +94,34 @@ func (sv *Supervisor) Run(ctx context.Context) error {
 	var curMod time.Time
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
+	wasReady := true
 	for {
+		ready := sv.Ready == nil || sv.Ready()
+		if !ready && wasReady {
+			log.Printf("no admin password set yet; no slots will start until one is")
+		}
+		wasReady = ready
 		if fi, err := os.Stat(sv.ConfigPath); err == nil && !fi.ModTime().Equal(curMod) {
 			cfg, err := config.Load(sv.ConfigPath)
 			if err != nil {
 				log.Printf("config: %v", err)
 			} else {
 				curMod = fi.ModTime()
-				sv.reconcile(ctx, cur, cfg)
+				if ready {
+					sv.reconcile(ctx, cur, cfg)
+				}
 				cur = cfg
 			}
 		}
 		sv.reapFinished()
+		switch {
+		case !ready:
+			sv.drainAll()
+		case cur != nil && cur.Configured() && sv.count() < cur.WorkerCount():
+			// Refill: drained slots (after a settings change) and slots
+			// that were never started because we weren't ready.
+			sv.reconcile(ctx, cur, cur)
+		}
 		select {
 		case <-ctx.Done():
 			sv.mu.Lock()
@@ -114,6 +133,39 @@ func (sv *Supervisor) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 		}
+	}
+}
+
+func (sv *Supervisor) count() int {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+	return len(sv.slots)
+}
+
+func (sv *Supervisor) drainAll() {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+	for _, s := range sv.slots {
+		s.startDrain()
+	}
+}
+
+// StopAll drains every slot and waits for them to exit, for "Remove".
+// The caller must already have saved an unconfigured config, so the
+// supervisor doesn't start new slots afterwards.
+func (sv *Supervisor) StopAll(timeout time.Duration) {
+	sv.drainAll()
+	done := make(chan struct{})
+	go func() {
+		for sv.count() > 0 {
+			sv.reapFinished()
+			time.Sleep(200 * time.Millisecond)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
 	}
 }
 
@@ -185,11 +237,7 @@ func sliceResources(cfg *config.Config, n int) (float64, int) {
 }
 
 func (sv *Supervisor) RunnerName(cfg *config.Config, n int) string {
-	prefix := cfg.NamePrefix
-	if prefix == "" {
-		prefix = sv.Hostname
-	}
-	return fmt.Sprintf("%s-%d", prefix, n)
+	return fmt.Sprintf("%s-%d", cfg.RunnerBase(sv.Hostname), n)
 }
 
 func (s *slot) write(st SlotState) {

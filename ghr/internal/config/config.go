@@ -68,13 +68,13 @@ type Target struct {
 
 func (c *Config) Target() (Target, error) {
 	u, err := url.Parse(strings.TrimSpace(c.URL))
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return Target{}, fmt.Errorf("url must look like https://github.com/<owner>[/<repo>]")
+	if err != nil || u.Host == "" || u.Scheme != "https" {
+		return Target{}, fmt.Errorf("url must look like https://github.com/<owner>[/<repo>] (https only, so the credential is never sent in clear text)")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	t := Target{APIBase: "https://api.github.com"}
 	if !strings.EqualFold(u.Host, "github.com") {
-		t.APIBase = u.Scheme + "://" + u.Host + "/api/v3" // GitHub Enterprise Server
+		t.APIBase = "https://" + u.Host + "/api/v3" // GitHub Enterprise Server
 	}
 	switch {
 	case len(parts) == 1 && parts[0] != "":
@@ -234,15 +234,49 @@ func (c *Config) Redacted() *Config {
 
 // MergeSecrets keeps existing secrets when the incoming value is empty or the
 // redaction placeholder.
+//
+// Saved secrets are only reused when the GitHub host is unchanged and the
+// credential is the same kind (and the same App), so a session that can't
+// read the secrets also can't send them somewhere new. Otherwise blank secret
+// fields stay blank and Validate asks for them again.
 func (c *Config) MergeSecrets(old *Config) {
-	keep := func(v, o string) string {
-		if v == "" || v == "********" {
-			return o
-		}
-		return v
+	blank := func(v string) bool { return v == "" || v == "********" }
+	if blank(c.Auth.PAT) {
+		c.Auth.PAT = ""
 	}
-	c.Auth.PAT = keep(c.Auth.PAT, old.Auth.PAT)
-	c.Auth.PrivateKey = keep(c.Auth.PrivateKey, old.Auth.PrivateKey)
+	if blank(c.Auth.PrivateKey) {
+		c.Auth.PrivateKey = ""
+	}
+	if old == nil || !sameHost(c.URL, old.URL) || c.Auth.Type != old.Auth.Type {
+		return
+	}
+	switch c.Auth.Type {
+	case "pat":
+		if c.Auth.PAT == "" {
+			c.Auth.PAT = old.Auth.PAT
+		}
+	case "app":
+		if c.Auth.PrivateKey == "" && c.Auth.AppID == old.Auth.AppID {
+			c.Auth.PrivateKey = old.Auth.PrivateKey
+		}
+	}
+}
+
+func sameHost(a, b string) bool {
+	ua, err1 := url.Parse(strings.TrimSpace(a))
+	ub, err2 := url.Parse(strings.TrimSpace(b))
+	return err1 == nil && err2 == nil && ua.Host != "" &&
+		strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
+}
+
+// RunnerBase is the start of every runner name this machine registers:
+// "<hostname>" or "<prefix>-<hostname>". The hostname (ghr-XXXX, from the
+// MAC address) keeps names unique when several sticks share a prefix.
+func (c *Config) RunnerBase(hostname string) string {
+	if c.NamePrefix == "" || c.NamePrefix == hostname {
+		return hostname
+	}
+	return c.NamePrefix + "-" + hostname
 }
 
 // ParseEnvFile reads runner.env (KEY=VALUE lines, # comments, optional quotes).

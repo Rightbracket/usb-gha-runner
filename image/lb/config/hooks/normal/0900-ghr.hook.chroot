@@ -61,6 +61,7 @@ systemctl set-default multi-user.target
 # --- Rebuild the initramfs so it includes the read-only rule.
 update-initramfs -u -k all
 lsinitramfs /boot/initrd.img-* | grep -q 10-ghr-readonly.rules || { echo "read-only rule missing from initramfs" >&2; exit 1; }
+lsinitramfs /boot/initrd.img-* | grep -q 'live/boot/9995-ghr-strict-media.sh' || { echo "strict live-media override missing from initramfs" >&2; exit 1; }
 
 # --- Trim.
 apt-get clean

@@ -12,6 +12,8 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +57,7 @@ func TestJITFlow(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	pemKey := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	var gotJIT map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v3/app/installations/9/access_tokens":
 			if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ey") {
@@ -75,17 +77,72 @@ func TestJITFlow(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	host := strings.TrimPrefix(srv.URL, "http://")
-	cfg := &config.Config{URL: "http://" + host + "/acme", RunnerGroup: "ci", Auth: config.Auth{Type: "app", AppID: "1", InstallationID: "9", PrivateKey: pemKey}}
+	host := strings.TrimPrefix(srv.URL, "https://")
+	cfg := &config.Config{URL: "https://" + host + "/acme", RunnerGroup: "ci", Auth: config.Auth{Type: "app", AppID: "1", InstallationID: "9", PrivateKey: pemKey}}
 	c, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.http.Transport = srv.Client().Transport
 	enc, r, err := c.JITConfig(context.Background(), "ghr-3f9a-1", []string{"self-hosted"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if enc != "ENC" || r.ID != 42 || gotJIT["runner_group_id"].(float64) != 7 || gotJIT["name"] != "ghr-3f9a-1" {
 		t.Errorf("enc=%s runner=%+v req=%v", enc, r, gotJIT)
+	}
+}
+
+func TestDeleteSlotRunnersExactNames(t *testing.T) {
+	var deleted []string
+	names := map[int64]string{1: "build-ghr-3f9a-1", 2: "build-ghr-3f9a-12", 3: "build-ghr-3f9a-box", 4: "build-ghr-3f9a2-1", 5: "other-1"}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/repos/acme/app/actions/runners":
+			var rs []map[string]any
+			for id, n := range names {
+				rs = append(rs, map[string]any{"id": id, "name": n})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"runners": rs})
+		case r.Method == "DELETE":
+			id, _ := strconv.ParseInt(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:], 10, 64)
+			deleted = append(deleted, names[id])
+			w.WriteHeader(204)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(&config.Config{URL: srv.URL + "/acme/app", Auth: config.Auth{Type: "pat", PAT: "tok"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http.Transport = srv.Client().Transport
+	n, err := c.DeleteSlotRunners(context.Background(), "build-ghr-3f9a")
+	sort.Strings(deleted)
+	if err != nil || n != 2 || strings.Join(deleted, ",") != "build-ghr-3f9a-1,build-ghr-3f9a-12" {
+		t.Fatalf("deleted %v (n=%d, err=%v)", deleted, n, err)
+	}
+}
+
+func TestNoCredentialOnCrossHostRedirect(t *testing.T) {
+	leaked := make(chan string, 1)
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked <- r.Header.Get("Authorization")
+	}))
+	defer other.Close()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c, _ := New(&config.Config{URL: srv.URL + "/acme/app", Auth: config.Auth{Type: "pat", PAT: "tok"}})
+	c.http.Transport = srv.Client().Transport
+	if err := c.Check(context.Background()); err == nil {
+		t.Fatal("redirect to another host was followed")
+	}
+	select {
+	case h := <-leaked:
+		t.Fatalf("other host got a request (Authorization %q)", h)
+	default:
 	}
 }

@@ -143,6 +143,7 @@ for _ in $(seq 60); do
   sleep 5
 done
 echo "$st" | jq . >"status-$mode-1.json"
+boot1=$(jq -r .machine.boot_id <<<"$st")
 jq -e '.stick.data_total_gb > 50' <<<"$st" >/dev/null && ok "GHR-DATA fills the stick ($(jq .stick.data_total_gb <<<"$st") GB)" || bad "data partition missing or small"
 jq -e '[.disks[] | select(.boot_stick)] | length == 1' <<<"$st" >/dev/null && ok "boot stick identified" || bad "boot stick not identified"
 jq -e '[.disks[] | select(.boot_stick | not)] | length == 4' <<<"$st" >/dev/null && ok "4 host disks seen" || bad "expected 4 host disks: $(jq -c '[.disks[].name]' <<<"$st")"
@@ -168,10 +169,11 @@ fi
 
 log "reboot"
 c -o /dev/null -X POST "$BASE/actions/reboot"
-sleep 20
+# Wait for the old system to go away, so we don't check it instead.
+for _ in $(seq 60); do c -o /dev/null -f "$BASE/api/health" || break; sleep 2; done
 if ! wait_up 180; then
   bad "did not come back after reboot"
-  grep -aE 'ghr|[Ff]ailed|error|sysbox|docker' "serial-$mode-2.log" | grep -av ssh-generator | tail -n 200 || true
+  grep -aE 'ghr|[Ff]ailed|error|sysbox|docker' "serial-$mode-1.log" | grep -av ssh-generator | tail -n 200 || true
   stop_vm
   dump_journal 2
   exit 1
@@ -190,11 +192,13 @@ else
   if [ "${login%% *}" = 303 ] && [[ $login != *err=* ]] && [ "$scode" = 200 ]; then ok "login works"; else
     bad "login failed (login: $login; status: $scode)"
     echo "  cookie jar:"; grep -v '^# ' "$jar" | sed 's/\t[^\t]*$/\t<value>/' || true
-    grep -aE 'ghr-web|ghr web|web\[' "serial-$mode-2.log" | tail -n 40 || true
+    grep -aE 'ghr-web|ghr web|web\[' "serial-$mode-1.log" | tail -n 40 || true
   fi
   fp2=$(echo | openssl s_client -connect "127.0.0.1:$PORT" 2>/dev/null | openssl x509 -noout -fingerprint -sha256)
   [ -n "$fp1" ] && [ "$fp1" = "$fp2" ] && ok "same TLS certificate" || bad "certificate changed ($fp1 / $fp2)"
   st=$(status || true); echo "$st" | jq . >"status-$mode-2.json" || true
+  boot2=$(jq -r .machine.boot_id <<<"$st" 2>/dev/null || true)
+  [ -n "$boot1" ] && [ -n "$boot2" ] && [ "$boot1" != "$boot2" ] && ok "it really rebooted (new boot id)" || bad "boot id unchanged or missing ($boot1 / $boot2)"
   jq -e '.disks_ok == true' <<<"$st" >/dev/null && ok "host disks still protected" || bad "host disks after reboot"
 fi
 

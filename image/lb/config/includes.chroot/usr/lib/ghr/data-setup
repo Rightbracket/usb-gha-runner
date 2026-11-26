@@ -59,16 +59,27 @@ fi
 # Never mount anything that isn't on the boot stick.
 [ "$(lsblk -ndo PKNAME "$datadev")" = "$disk" ] || fail "$datadev is not on the boot stick"
 blockdev --setrw "$datadev"
+# A first boot interrupted between creating and formatting the partition
+# leaves it empty; format it now instead of failing on every boot.
+# blkid exits 2 only when it finds no signature at all; any other failure
+# must not lead to formatting.
+probe=0
+blkid -p "$datadev" >/dev/null 2>&1 || probe=$?
+if [ "$probe" -eq 2 ]; then
+  log "$datadev has no filesystem (interrupted first boot?); formatting it"
+  mkfs.ext4 -q -F -L GHR-DATA -m 1 -E lazy_itable_init=1,lazy_journal_init=1 "$datadev"
+fi
 rc=0
 e2fsck -p "$datadev" || rc=$?
 [ "$rc" -le 2 ] || fail "e2fsck found errors it couldn't fix on $datadev (exit $rc)"
 
 mkdir -p /data
 mountpoint -q /data || mount -o noatime,lazytime "$datadev" /data
-for d in docker containerd containers sysbox registry-mirror ghr etc/ghr etc/ghr-web log/journal; do
+for d in docker containerd containers sysbox registry-mirror ghr etc/ghr etc/ghr-ssh etc/ghr-web log/journal; do
   mkdir -p "/data/$d"
 done
 chmod 700 /data/etc/ghr
+chown root:root /data/etc/ghr-ssh && chmod 755 /data/etc/ghr-ssh
 chown ghr-web:ghr-web /data/etc/ghr-web && chmod 700 /data/etc/ghr-web
 chgrp systemd-journal /data/log/journal && chmod 2755 /data/log/journal
 # Each boot gets a new machine ID, so keep only the newest journal folders.

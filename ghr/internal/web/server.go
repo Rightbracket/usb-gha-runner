@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -35,6 +36,9 @@ type Server struct {
 	Version     string
 	Hostname    string
 	Fingerprint string
+	// SetupLockFile, when it exists, keeps first-visitor setup closed: the
+	// stick has a preset password that couldn't be applied.
+	SetupLockFile string
 
 	agent *http.Client
 	tpl   *template.Template
@@ -235,12 +239,33 @@ func (s *Server) getSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	s.render(w, "setup", s.page(r, "Set admin password", nil))
+	p := s.page(r, "Set admin password", nil)
+	if msg := s.setupLocked(); msg != "" {
+		p.Err = msg
+	}
+	s.render(w, "setup", p)
+}
+
+// setupLocked returns why first-visitor setup is closed, or "".
+func (s *Server) setupLocked() string {
+	if s.SetupLockFile == "" {
+		return ""
+	}
+	b, err := os.ReadFile(s.SetupLockFile)
+	if err != nil {
+		return ""
+	}
+	return "Setup is locked: this stick has a preset password in ghr/admin-password, but it couldn't be used (" +
+		strings.TrimSpace(string(b)) + "). Fix that file on the stick and reboot."
 }
 
 func (s *Server) postSetup(w http.ResponseWriter, r *http.Request) {
 	if s.Auth.HasPassword() {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if msg := s.setupLocked(); msg != "" {
+		back(w, r, "/setup", "", msg)
 		return
 	}
 	client := auth.ClientKey(r)
@@ -250,15 +275,14 @@ func (s *Server) postSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	pw, confirm := r.PostFormValue("password"), r.PostFormValue("confirm")
 	if pw != confirm {
-		s.Auth.Fail(client)
 		back(w, r, "/setup", "", "The two passwords don't match.")
 		return
 	}
 	if err := s.Auth.SetPasswordIfUnset(pw); err != nil {
-		s.Auth.Fail(client)
 		back(w, r, "/setup", "", err.Error())
 		return
 	}
+	s.Auth.Succeeded(client)
 	s.Auth.Login(w)
 	back(w, r, "/config", "Password set. Next, connect this machine to GitHub.", "")
 }
@@ -278,10 +302,10 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.Auth.Check(r.PostFormValue("password")) {
-		s.Auth.Fail(client)
 		back(w, r, "/login", "", "Wrong password.")
 		return
 	}
+	s.Auth.Succeeded(client)
 	s.Auth.Login(w)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -293,10 +317,10 @@ func (s *Server) postPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.Auth.Check(r.PostFormValue("current")) {
-		s.Auth.Fail(client)
 		back(w, r, "/config", "", "The current password is wrong.")
 		return
 	}
+	s.Auth.Succeeded(client)
 	if r.PostFormValue("password") != r.PostFormValue("confirm") {
 		back(w, r, "/config", "", "The new passwords don't match.")
 		return

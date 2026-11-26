@@ -33,7 +33,7 @@ jobs:
           sudo apt-get install -y -qq shellcheck >/dev/null
           shellcheck -S warning image/build.sh image/scripts/*.sh image/job/entrypoint.sh \
             image/lb/auto/config image/lb/config/hooks/normal/*.hook.chroot \
-            image/lb/config/includes.chroot/usr/lib/ghr/* \
+            image/lb/config/includes.chroot/usr/lib/ghr/* image/lb/config/includes.chroot/usr/lib/live/boot/*.sh \
             image/lb/config/includes.chroot/etc/initramfs-tools/hooks/* test/qemu/*.sh
 
   image:

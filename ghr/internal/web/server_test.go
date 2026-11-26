@@ -206,3 +206,53 @@ func TestEnsureCertStable(t *testing.T) {
 		t.Fatal("fingerprint.txt mismatch")
 	}
 }
+
+func TestLoginRateLimitConcurrent(t *testing.T) {
+	ts, _, c := newTestServer(t)
+	post(t, c, ts.URL+"/setup", url.Values{"password": {"correct horse"}, "confirm": {"correct horse"}})
+	anon := &http.Client{Transport: c.Transport, CheckRedirect: c.CheckRedirect}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wrong := 0
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, err := anon.PostForm(ts.URL+"/login", url.Values{"password": {"nope"}})
+			if err != nil {
+				return
+			}
+			r.Body.Close()
+			if strings.Contains(r.Header.Get("Location"), "Wrong+password") {
+				mu.Lock()
+				wrong++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if wrong > 5 {
+		t.Fatalf("%d of 20 parallel guesses were checked; the limit is 5", wrong)
+	}
+}
+
+func TestSetupLockedByBadPreset(t *testing.T) {
+	fa, sock := startFakeAgent(t)
+	_ = fa
+	d := t.TempDir()
+	lock := filepath.Join(d, "admin-password-error")
+	os.WriteFile(lock, []byte("password must be at least 10 characters\n"), 0o644)
+	s, err := New(auth.NewStore(filepath.Join(d, "admin.json")), sock, "test", "ghr-test", "AA:BB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetupLockFile = lock
+	ts := httptest.NewTLSServer(s.Handler())
+	defer ts.Close()
+	c := ts.Client()
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	r := post(t, c, ts.URL+"/setup", url.Values{"password": {"attacker pw!"}, "confirm": {"attacker pw!"}})
+	if !strings.Contains(r.Header.Get("Location"), "Setup+is+locked") || s.Auth.HasPassword() {
+		t.Fatalf("setup not locked: %s", r.Header.Get("Location"))
+	}
+}

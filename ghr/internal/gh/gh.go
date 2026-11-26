@@ -18,7 +18,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +42,19 @@ func New(cfg *config.Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{cfg: cfg, target: t, http: &http.Client{Timeout: 30 * time.Second}}, nil
+	return &Client{cfg: cfg, target: t, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: sameOriginRedirect}}, nil
+}
+
+// sameOriginRedirect stops the credential from following a redirect to
+// plain HTTP or to another host.
+func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
 }
 
 // APIError carries the HTTP status so callers can react to 404/409/422.
@@ -255,9 +269,11 @@ func (c *Client) Check(ctx context.Context) error {
 	return err
 }
 
-// DeleteRunnersWithPrefix removes every registered runner whose name starts
-// with prefix and returns how many were removed.
-func (c *Client) DeleteRunnersWithPrefix(ctx context.Context, prefix string) (int, error) {
+// DeleteSlotRunners removes the runners this machine registers, named
+// exactly "<base>-<slot number>", and returns how many were removed. Other
+// runners that merely share the start of the name are left alone.
+func (c *Client) DeleteSlotRunners(ctx context.Context, base string) (int, error) {
+	re := regexp.MustCompile("^" + regexp.QuoteMeta(base) + "-[0-9]+$")
 	var victims []Runner
 	for page := 1; page <= 50; page++ {
 		var out struct {
@@ -268,7 +284,7 @@ func (c *Client) DeleteRunnersWithPrefix(ctx context.Context, prefix string) (in
 			return 0, err
 		}
 		for _, r := range out.Runners {
-			if len(r.Name) > len(prefix) && r.Name[:len(prefix)] == prefix {
+			if re.MatchString(r.Name) {
 				victims = append(victims, r)
 			}
 		}

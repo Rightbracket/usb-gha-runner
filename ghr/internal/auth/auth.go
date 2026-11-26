@@ -39,10 +39,13 @@ type Store struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time
 	fails    map[string][]time.Time
+	// hashing bounds concurrent PBKDF2 checks, so a flood of logins can't
+	// pin every CPU the jobs need.
+	hashing chan struct{}
 }
 
 func NewStore(path string) *Store {
-	return &Store{Path: path, sessions: map[string]time.Time{}, fails: map[string][]time.Time{}}
+	return &Store{Path: path, sessions: map[string]time.Time{}, fails: map[string][]time.Time{}, hashing: make(chan struct{}, 2)}
 }
 
 func (s *Store) HasPassword() bool {
@@ -84,6 +87,8 @@ func (s *Store) SetPasswordIfUnset(pw string) error {
 }
 
 func (s *Store) Check(pw string) bool {
+	s.hashing <- struct{}{}
+	defer func() { <-s.hashing }()
 	b, err := os.ReadFile(s.Path)
 	if err != nil {
 		return false
@@ -98,7 +103,10 @@ func (s *Store) Check(pw string) bool {
 	return err == nil && subtle.ConstantTimeCompare(got, want) == 1
 }
 
-// Allow rate-limits login attempts: 5 failures per client per 5 minutes.
+// Allow rate-limits password attempts: 5 per client per 5 minutes. It
+// counts the attempt before the password is checked, so parallel requests
+// can't all slip in before the first failure is recorded; call Succeeded
+// after a correct password to give the attempt back.
 func (s *Store) Allow(client string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -109,14 +117,21 @@ func (s *Store) Allow(client string) bool {
 			keep = append(keep, t)
 		}
 	}
-	s.fails[client] = keep
-	return len(keep) < 5
+	if len(keep) >= 5 {
+		s.fails[client] = keep
+		return false
+	}
+	s.fails[client] = append(keep, time.Now())
+	return true
 }
 
-func (s *Store) Fail(client string) {
+// Succeeded removes the attempt Allow counted for a correct password.
+func (s *Store) Succeeded(client string) {
 	s.mu.Lock()
-	s.fails[client] = append(s.fails[client], time.Now())
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if f := s.fails[client]; len(f) > 0 {
+		s.fails[client] = f[:len(f)-1]
+	}
 }
 
 func (s *Store) Login(w http.ResponseWriter) {

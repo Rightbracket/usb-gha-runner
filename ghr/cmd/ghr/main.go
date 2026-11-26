@@ -87,6 +87,7 @@ func runWeb(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	srv.SetupLockFile = importer.PasswordErrorFile
 	https := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

@@ -36,6 +36,7 @@ type Disk struct {
 
 type Machine struct {
 	Hostname    string   `json:"hostname"`
+	BootID      string   `json:"boot_id"`
 	UptimeSec   int64    `json:"uptime_sec"`
 	Load1       float64  `json:"load1"`
 	CPUs        int      `json:"cpus"`
@@ -166,6 +167,9 @@ func (c *Collector) history(n int) []supervisor.HistoryEntry {
 func (c *Collector) machine() Machine {
 	m := Machine{CPUs: runtime.NumCPU()}
 	m.Hostname, _ = os.Hostname()
+	if b, err := os.ReadFile(filepath.Join(c.Proc, "sys/kernel/random/boot_id")); err == nil {
+		m.BootID = strings.TrimSpace(string(b))
+	}
 	if b, err := os.ReadFile(filepath.Join(c.Proc, "uptime")); err == nil {
 		if f := strings.Fields(string(b)); len(f) > 0 {
 			v, _ := strconv.ParseFloat(f[0], 64)

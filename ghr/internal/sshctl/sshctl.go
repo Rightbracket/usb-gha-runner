@@ -15,7 +15,9 @@ import (
 )
 
 var (
-	Dir            = filepath.Join(config.EtcDir, "ssh")
+	// Not under EtcDir: that is root-only (it holds the GitHub credential),
+	// and sshd reads authorized_keys as the "ghr" user, which needs to get in.
+	Dir            = "/data/etc/ghr-ssh"
 	AuthorizedKeys = filepath.Join(Dir, "authorized_keys")
 	HostKey        = filepath.Join(Dir, "ssh_host_ed25519_key")
 )

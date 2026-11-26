@@ -31,4 +31,8 @@ fi
 chgrp docker /var/run/docker.sock || true
 
 cd /home/runner/actions-runner
-exec runuser -u runner -- ./run.sh --jitconfig "$jit"
+# The runner reads --jitconfig from ACTIONS_RUNNER_INPUT_JITCONFIG, which
+# keeps the secret out of the process list (argv is world-readable).
+export ACTIONS_RUNNER_INPUT_JITCONFIG="$jit"
+unset jit
+exec runuser -u runner -- ./run.sh
