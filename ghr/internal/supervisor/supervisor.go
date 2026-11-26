@@ -407,6 +407,11 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 				s.parent.appendHistory(HistoryEntry{Time: time.Now(), Slot: s.n, RunnerName: name, Job: strings.TrimSpace(m[1]), Result: m[2], Seconds: sec})
 			}
 		}
+		if err := sc.Err(); err != nil {
+			log.Printf("slot %d: output: %v", s.n, err)
+		}
+		// Keep reading so cmd.Wait can return even after an over-long line.
+		_, _ = io.Copy(io.Discard, pr)
 	}()
 
 	// docker stop can miss a container that is still being created (it
