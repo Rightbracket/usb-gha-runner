@@ -111,6 +111,11 @@ func (s *Server) Handler() http.Handler {
 			AfterPct  float64 `json:"after_pct"`
 		}
 		if err := s.call(r.Context(), "POST", "/v1/prune", nil, &res); err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				back(w, r, "/", "Pruning is taking a while and continues in the background. Check /data usage again in a few minutes.", "")
+				return
+			}
 			back(w, r, "/", "", err.Error())
 			return
 		}
@@ -519,7 +524,7 @@ func (s *Server) do(ctx context.Context, method, path string, body any) (*http.R
 	}
 	resp, err := s.agent.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("the runner service isn't answering (%v). Check the logs page", err)
+		return nil, fmt.Errorf("the runner service isn't answering (%w). Check the logs page", err)
 	}
 	return resp, nil
 }

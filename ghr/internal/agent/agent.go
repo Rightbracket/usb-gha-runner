@@ -172,7 +172,8 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/remove", a.remove)
 	mux.HandleFunc("PUT /v1/ssh", a.putSSH)
 	mux.HandleFunc("POST /v1/prune", func(w http.ResponseWriter, r *http.Request) {
-		res, err := prune.Run(r.Context(), 0)
+		// A prune can outlast the web UI's request; let it finish anyway.
+		res, err := prune.Run(context.WithoutCancel(r.Context()), 0)
 		if err != nil {
 			httpErr(w, err, 500)
 			return
@@ -331,9 +332,9 @@ func (a *Agent) cleanupStaleSlots() {
 }
 
 // ensureImages loads the job and mirror images shipped on the stick into
-// Docker on /data, once per image release.
+// Docker on /data, once per image release, and again if either is missing.
 func ensureImages(jobImage string) error {
-	if exec.Command("docker", "image", "inspect", jobImage).Run() == nil {
+	if exec.Command("docker", "image", "inspect", jobImage, MirrorImage).Run() == nil {
 		return nil
 	}
 	if _, err := os.Stat(ImagesArchive); err != nil {

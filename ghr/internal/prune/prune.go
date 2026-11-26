@@ -1,6 +1,7 @@
 // Package prune frees space on /data by clearing builder caches. Images and
-// containers labelled ghr.keep=true (the job image and the registry mirror)
-// are never removed.
+// containers labelled ghr.keep=true (the job image and the registry mirror
+// container) are never removed. The registry image itself is kept while the
+// mirror container uses it, and is reloaded from the stick if it goes missing.
 package prune
 
 import (
@@ -54,32 +55,51 @@ func Run(ctx context.Context, threshold float64) (*Result, error) {
 		{"podman", "system", "prune", "-af"},
 	}
 	for _, s := range steps {
-		r.Steps = append(r.Steps, run(ctx, s...))
+		line, _ := run(ctx, s...)
+		r.Steps = append(r.Steps, line)
 	}
 	// Still too full: drop the registry mirror's cached layers too.
 	if after, _ := UsedPct(config.DataDir); threshold > 0 && after >= threshold || threshold <= 0 {
-		r.Steps = append(r.Steps, run(ctx, "docker", "stop", "ghr-mirror"))
-		if err := os.RemoveAll("/data/registry-mirror/docker"); err != nil {
-			r.Steps = append(r.Steps, "clear mirror: "+err.Error())
-		} else {
-			r.Steps = append(r.Steps, "cleared registry mirror cache")
-		}
-		r.Steps = append(r.Steps, run(ctx, "docker", "start", "ghr-mirror"))
+		r.Steps = append(r.Steps, clearMirror(ctx, mirrorCache)...)
 	}
 	r.AfterPct, _ = UsedPct(config.DataDir)
 	return r, nil
 }
 
-func run(ctx context.Context, args ...string) string {
+// mirrorCache holds the registry mirror's cached layers.
+var mirrorCache = "/data/registry-mirror/docker"
+
+// clearMirror stops the mirror, deletes its cache and starts it again. Once
+// begun it runs to the end even if ctx is cancelled, so the mirror is never
+// left stopped, and the cache is deleted only after the stop succeeded.
+func clearMirror(ctx context.Context, dir string) []string {
+	ctx = context.WithoutCancel(ctx)
+	line, err := run(ctx, "docker", "stop", "ghr-mirror")
+	steps := []string{line}
+	if err != nil {
+		steps = append(steps, "kept registry mirror cache: the mirror didn't stop")
+	} else if err := os.RemoveAll(dir); err != nil {
+		steps = append(steps, "clear mirror: "+err.Error())
+	} else {
+		steps = append(steps, "cleared registry mirror cache")
+	}
+	line, _ = run(ctx, "docker", "start", "ghr-mirror")
+	return append(steps, line)
+}
+
+// execCmd builds the commands that run executes; tests replace it.
+var execCmd = exec.CommandContext
+
+func run(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	out, err := execCmd(ctx, args[0], args[1:]...).CombinedOutput()
 	line := fmt.Sprintf("%v: ok", args)
 	if err != nil {
 		line = fmt.Sprintf("%v: %v: %s", args, err, lastLine(out))
 	}
 	log.Print(line)
-	return line
+	return line, err
 }
 
 func lastLine(b []byte) string {
