@@ -1,0 +1,33 @@
+#!/bin/bash
+# Console banner shown above the login prompt: where to find the web page,
+# the DHCP address (agetty fills in \4) and the certificate fingerprint.
+fp_file=/data/etc/ghr-web/tls/fingerprint.txt
+for _ in $(seq 30); do [ -s "$fp_file" ] && break; sleep 1; done
+fp=$(cat "$fp_file" 2>/dev/null || true)
+name=$(hostname)
+mkdir -p /run/ghr
+{
+  echo
+  echo "  USB GitHub Actions runner $(cat /usr/share/ghr/version 2>/dev/null)"
+  echo
+  echo "  Configure it and check status from a browser on the same network:"
+  echo "      https://${name}.local/"
+  echo "      https://\4/"
+  echo
+  if [ -n "$fp" ]; then
+    echo "  The page's certificate SHA-256 fingerprint should be:"
+    echo "      ${fp:0:47}"
+    echo "      ${fp:48}"
+  else
+    echo "  The web page has not started yet. Check: journalctl -u ghr-web"
+  fi
+  if [ -e /run/ghr/data-error ]; then
+    echo
+    echo "  ERROR setting up the data partition: $(cat /run/ghr/data-error)"
+  fi
+  if [ -e /run/ghr/stick-small ]; then
+    echo
+    echo "  Warning: this stick is smaller than the recommended 64 GB."
+  fi
+  echo
+} >/run/ghr/issue

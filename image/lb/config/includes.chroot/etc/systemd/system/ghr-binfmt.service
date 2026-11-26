@@ -1,0 +1,12 @@
+[Unit]
+Description=Make QEMU binfmt handlers usable inside containers
+After=systemd-binfmt.service
+Before=docker.service ghr-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/ghr/binfmt-fix
+
+[Install]
+WantedBy=multi-user.target

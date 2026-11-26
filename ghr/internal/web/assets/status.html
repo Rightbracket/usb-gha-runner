@@ -1,0 +1,56 @@
+{{define "status"}}{{template "top" .}}
+<div id="status" data-page="status">
+  <section class="card">
+    <div class="row between">
+      <h1>Runner</h1>
+      <span id="target" class="muted"></span>
+    </div>
+    <div id="not-configured" class="hidden">
+      <p>Not connected to GitHub yet. <a href="/config">Configure it</a>.</p>
+    </div>
+    <table class="grid" id="slots">
+      <thead><tr><th>Slot</th><th>Runner name</th><th>State</th><th>Job</th><th>Since</th><th>CPU / memory limit</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h2>Recent jobs</h2>
+    <table class="grid" id="history">
+      <thead><tr><th>Finished</th><th>Runner</th><th>Job</th><th>Result</th><th>Took</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <div class="cols">
+    <section class="card">
+      <h2>Machine</h2>
+      <dl id="machine"></dl>
+    </section>
+    <section class="card">
+      <h2>Stick</h2>
+      <dl id="stick"></dl>
+      <form method="post" action="/actions/prune"><button>Prune caches now</button></form>
+    </section>
+    <section class="card">
+      <h2>Builders</h2>
+      <dl id="builders"></dl>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="row between">
+      <h2>Host disks</h2>
+      <span id="disks-ok" class="pill"></span>
+    </div>
+    <p class="muted small">Every disk except the boot stick should be read-only and never mounted.</p>
+    <table class="grid" id="disks">
+      <thead><tr><th>Disk</th><th>Model</th><th>Size</th><th>Read-only</th><th>Mounted</th><th>In use by</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card row gap">
+    <form method="post" action="/actions/reboot" data-confirm="Reboot this machine? Running jobs will fail."><button>Reboot</button></form>
+    <form method="post" action="/actions/poweroff" data-confirm="Shut this machine down? Running jobs will fail."><button>Shut down</button></form>
+    <span class="muted small" id="updated"></span>
+  </section>
+</div>
+{{template "bottom" .}}{{end}}

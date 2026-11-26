@@ -1,0 +1,16 @@
+[Unit]
+Description=GHR agent: GitHub Actions job slots in Sysbox containers
+Requires=docker.service ghr-data.service
+Wants=network-online.target sysbox.service
+After=docker.service sysbox.service ghr-data.service ghr-import.service ghr-binfmt.service network-online.target nftables.service
+
+[Service]
+ExecStart=/usr/local/bin/ghr agent
+Restart=always
+RestartSec=5
+# Let running job containers get a stop signal before Docker goes away.
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

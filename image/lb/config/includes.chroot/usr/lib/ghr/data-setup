@@ -1,0 +1,85 @@
+#!/bin/bash
+# Find the boot stick, create GHR-DATA in its free space on first boot, and
+# mount it at /data with the persistent folders bind-mounted into place.
+# Only the disk that holds the live medium is ever written.
+set -euo pipefail
+RUN=/run/ghr
+mkdir -p "$RUN"
+rm -f "$RUN/data-error"
+log() { echo "ghr-data: $*"; }
+fail() { echo "ghr-data: $*" >&2; echo "$*" >"$RUN/data-error"; exit 1; }
+
+# Let coldplug finish first so no late udev event races the writes below.
+udevadm settle -t 60 || true
+
+medium=/run/live/medium
+src=$(findmnt -nro SOURCE "$medium" 2>/dev/null || true)
+[ -n "$src" ] || fail "the boot medium is not mounted at $medium"
+bootpart=$(basename "$(readlink -f "$src")")
+want=$(sed -n 's/.*ghr\.boot-uuid=\([^ ]*\).*/\1/p' /proc/cmdline)
+have=$(blkid -s UUID -o value "/dev/$bootpart" 2>/dev/null || true)
+if [ -n "$want" ] && [ "$want" != "$have" ]; then
+  fail "boot partition /dev/$bootpart has UUID '$have', expected '$want'"
+fi
+disk=$(lsblk -ndo PKNAME "/dev/$bootpart")
+[ -n "$disk" ] || fail "can't find the disk that holds /dev/$bootpart"
+echo "$disk" >"$RUN/boot-disk"
+log "boot stick is /dev/$disk (boot partition /dev/$bootpart)"
+
+# The initramfs made every disk read-only, the stick included. Make the
+# stick's whole-disk device writable again so its partition table can grow.
+# The GHR-BOOT partition itself stays read-only.
+blockdev --setrw "/dev/$disk"
+
+find_data() { lsblk -nrpo NAME,PARTLABEL "/dev/$disk" | awk '$2=="GHR-DATA" {print $1; exit}'; }
+datadev=$(find_data)
+if [ -z "$datadev" ]; then
+  log "first boot: creating GHR-DATA in the free space of /dev/$disk"
+  size=$(blockdev --getsize64 "/dev/$disk")
+  if [ "$size" -lt 60000000000 ]; then
+    log "warning: the stick is only $((size / 1000000000)) GB; 64 GB or more is recommended"
+    echo "$size" >"$RUN/stick-small"
+  fi
+  # Move the backup GPT to the real end of the stick, then add the partition.
+  sgdisk -e "/dev/$disk" >/dev/null || log "sgdisk -e returned $?"
+  last=$(sgdisk -p "/dev/$disk" | awk '/^ +[0-9]+ / {n=$1} END {print n+0}')
+  num=$((last + 1))
+  sgdisk -n "$num:0:0" -t "$num:8300" -c "$num:GHR-DATA" "/dev/$disk" >/dev/null || log "sgdisk -n returned $?"
+  # GHR-BOOT is mounted, so add just the new partition instead of re-reading the table.
+  partx -a --nr "$num" "/dev/$disk" 2>/dev/null || partx -u "/dev/$disk" 2>/dev/null || true
+  udevadm settle -t 30 || true
+  datadev=$(find_data)
+  [ -n "$datadev" ] || fail "created partition $num on /dev/$disk but it did not appear"
+  blockdev --setrw "$datadev"
+  mkfs.ext4 -q -F -L GHR-DATA -m 1 -E lazy_itable_init=1,lazy_journal_init=1 "$datadev"
+fi
+
+# Never mount anything that isn't on the boot stick.
+[ "$(lsblk -ndo PKNAME "$datadev")" = "$disk" ] || fail "$datadev is not on the boot stick"
+blockdev --setrw "$datadev"
+rc=0
+e2fsck -p "$datadev" || rc=$?
+[ "$rc" -le 2 ] || fail "e2fsck found errors it couldn't fix on $datadev (exit $rc)"
+
+mkdir -p /data
+mountpoint -q /data || mount -o noatime,lazytime "$datadev" /data
+for d in docker containerd containers sysbox registry-mirror ghr etc/ghr etc/ghr-web log/journal; do
+  mkdir -p "/data/$d"
+done
+chmod 700 /data/etc/ghr
+chown ghr-web:ghr-web /data/etc/ghr-web && chmod 700 /data/etc/ghr-web
+chgrp systemd-journal /data/log/journal && chmod 2755 /data/log/journal
+# Each boot gets a new machine ID, so keep only the newest journal folders.
+ls -1dt /data/log/journal/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf
+
+bind() {
+  mkdir -p "$2"
+  mountpoint -q "$2" || mount --bind "$1" "$2"
+}
+bind /data/docker /var/lib/docker
+bind /data/containerd /var/lib/containerd
+bind /data/containers /var/lib/containers
+bind /data/sysbox /var/lib/sysbox
+bind /data/etc/ghr /etc/ghr
+bind /data/log/journal /var/log/journal
+log "mounted $datadev at /data ($(df -h --output=avail /data | tail -1 | tr -d ' ') free)"

@@ -1,0 +1,3 @@
+# Every block device that isn't on the boot stick is set read-only at the
+# kernel level as soon as it appears (including hot-plugged disks).
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL!="loop*|ram*|zram*|nbd*|sr*|fd*|dm-*|md*", RUN+="/usr/lib/ghr/blockguard %k"

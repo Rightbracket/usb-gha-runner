@@ -1,0 +1,14 @@
+[Unit]
+Description=Name this machine ghr-XXXX from its MAC address
+DefaultDependencies=no
+After=systemd-udev-trigger.service systemd-remount-fs.service
+Wants=network-pre.target
+Before=network-pre.target systemd-networkd.service avahi-daemon.service ghr-web.service sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/ghr/hostname-setup
+
+[Install]
+WantedBy=sysinit.target

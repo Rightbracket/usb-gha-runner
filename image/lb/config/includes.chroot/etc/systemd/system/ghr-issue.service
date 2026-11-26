@@ -1,0 +1,12 @@
+[Unit]
+Description=Show the web page address on the console
+After=ghr-web.service ghr-data.service ghr-hostname.service
+Before=getty.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/ghr/issue-update
+
+[Install]
+WantedBy=multi-user.target

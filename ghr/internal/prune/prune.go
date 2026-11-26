@@ -1,0 +1,96 @@
+// Package prune frees space on /data by clearing builder caches. Images and
+// containers labelled ghr.keep=true (the job image and the registry mirror)
+// are never removed.
+package prune
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"syscall"
+	"time"
+
+	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
+)
+
+type Result struct {
+	BeforePct float64  `json:"before_pct"`
+	AfterPct  float64  `json:"after_pct"`
+	Skipped   bool     `json:"skipped"`
+	Steps     []string `json:"steps"`
+}
+
+// UsedPct returns how full the filesystem holding dir is, in percent.
+func UsedPct(dir string) (float64, error) {
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(dir, &fs); err != nil {
+		return 0, err
+	}
+	if fs.Blocks == 0 {
+		return 0, nil
+	}
+	return 100 * (1 - float64(fs.Bavail)/float64(fs.Blocks)), nil
+}
+
+// Run prunes when /data is above threshold percent full. threshold <= 0
+// prunes unconditionally (the "Prune now" button).
+func Run(ctx context.Context, threshold float64) (*Result, error) {
+	before, err := UsedPct(config.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	r := &Result{BeforePct: before}
+	if threshold > 0 && before < threshold {
+		r.Skipped, r.AfterPct = true, before
+		return r, nil
+	}
+	steps := [][]string{
+		{"docker", "container", "prune", "-f", "--filter", "label!=ghr.keep=true"},
+		{"docker", "image", "prune", "-af", "--filter", "label!=ghr.keep=true"},
+		{"docker", "builder", "prune", "-af"},
+		{"docker", "volume", "prune", "-af"},
+		{"podman", "system", "prune", "-af"},
+	}
+	for _, s := range steps {
+		r.Steps = append(r.Steps, run(ctx, s...))
+	}
+	// Still too full: drop the registry mirror's cached layers too.
+	if after, _ := UsedPct(config.DataDir); threshold > 0 && after >= threshold || threshold <= 0 {
+		r.Steps = append(r.Steps, run(ctx, "docker", "stop", "ghr-mirror"))
+		if err := os.RemoveAll("/data/registry-mirror/docker"); err != nil {
+			r.Steps = append(r.Steps, "clear mirror: "+err.Error())
+		} else {
+			r.Steps = append(r.Steps, "cleared registry mirror cache")
+		}
+		r.Steps = append(r.Steps, run(ctx, "docker", "start", "ghr-mirror"))
+	}
+	r.AfterPct, _ = UsedPct(config.DataDir)
+	return r, nil
+}
+
+func run(ctx context.Context, args ...string) string {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	line := fmt.Sprintf("%v: ok", args)
+	if err != nil {
+		line = fmt.Sprintf("%v: %v: %s", args, err, lastLine(out))
+	}
+	log.Print(line)
+	return line
+}
+
+func lastLine(b []byte) string {
+	s := string(b)
+	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '\n' {
+			return s[i+1:]
+		}
+	}
+	return s
+}

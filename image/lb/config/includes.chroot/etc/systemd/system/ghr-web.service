@@ -1,0 +1,27 @@
+[Unit]
+Description=GHR web: configuration and status page (HTTPS)
+Requires=ghr-data.service
+After=ghr-data.service ghr-import.service ghr-hostname.service
+
+[Service]
+User=ghr-web
+Group=ghr-web
+SupplementaryGroups=systemd-journal
+ExecStart=/usr/local/bin/ghr web
+Restart=always
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/data/etc/ghr-web
+
+[Install]
+WantedBy=multi-user.target

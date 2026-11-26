@@ -1,0 +1,70 @@
+# Base system
+systemd-sysv
+systemd-resolved
+systemd-timesyncd
+dbus
+udev
+kmod
+hostname
+procps
+psmisc
+less
+vim-tiny
+htop
+jq
+zstd
+xz-utils
+pigz
+ca-certificates
+curl
+sudo
+pciutils
+usbutils
+lm-sensors
+
+# Network: DHCP via systemd-networkd, mDNS name, firewall, optional SSH
+iproute2
+iputils-ping
+ethtool
+nftables
+iptables
+avahi-daemon
+openssh-server
+
+# Stick partitioning on first boot (boot stick only)
+gdisk
+e2fsprogs
+dosfstools
+util-linux
+
+# Container builders
+docker-ce
+docker-ce-cli
+containerd.io
+docker-buildx-plugin
+docker-compose-plugin
+buildah
+podman
+crun
+netavark
+aardvark-dns
+passt
+catatonit
+fuse-overlayfs
+uidmap
+
+# Sysbox runtime dependencies (Sysbox itself is unpacked by the hook)
+rsync
+fuse3
+
+# Emulation of other architectures
+qemu-user-static
+
+# Hardware
+firmware-linux-free
+firmware-misc-nonfree
+firmware-realtek
+firmware-bnx2
+firmware-bnx2x
+intel-microcode
+amd64-microcode

@@ -1,0 +1,118 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ghr/go.mod
+          cache-dependency-path: ghr/go.mod
+      - name: go vet and test
+        working-directory: ghr
+        run: |
+          go vet ./...
+          go test -race ./...
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y -qq shellcheck >/dev/null
+          shellcheck -S warning image/build.sh image/scripts/*.sh image/job/entrypoint.sh \
+            image/lb/auto/config image/lb/config/hooks/normal/*.hook.chroot \
+            image/lb/config/includes.chroot/usr/lib/ghr/* \
+            image/lb/config/includes.chroot/etc/initramfs-tools/hooks/* test/qemu/*.sh
+
+  image:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ghr/go.mod
+          cache-dependency-path: ghr/go.mod
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af >/dev/null
+          df -h /
+      - name: Build ghr-usb.img
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: image/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghr-usb
+          path: |
+            out/ghr-usb.img.zst
+            out/SHA256SUMS
+            out/manifest.txt
+            out/packages.txt
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-build-log
+          path: out/live-build.log
+          retention-days: 7
+
+  qemu:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        firmware: [uefi, bios]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ghr-usb
+          path: out
+      - name: Install QEMU and disk tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 ovmf ntfs-3g mdadm lvm2 gdisk zstd jq openssl >/dev/null
+          # Keep the runner's own udev/LVM from grabbing the fake disks.
+          sudo systemctl stop lvm2-monitor.service 2>/dev/null || true
+      - name: Enable KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+          ls -l /dev/kvm || echo "no KVM: tests run with TCG and are slow"
+      - name: Boot tests (${{ matrix.firmware }})
+        env:
+          GHR_TEST_URL: ${{ vars.GHR_TEST_URL }}
+          GHR_TEST_PAT: ${{ secrets.GHR_TEST_PAT }}
+        run: |
+          zstd -d -q out/ghr-usb.img.zst -o out/ghr-usb.img
+          test/qemu/run.sh out/ghr-usb.img ${{ matrix.firmware }} "$RUNNER_TEMP/qemu"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-${{ matrix.firmware }}-logs
+          path: |
+            ${{ runner.temp }}/qemu/serial-*.log
+            ${{ runner.temp }}/qemu/status-*.json
+          retention-days: 7

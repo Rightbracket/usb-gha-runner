@@ -1,0 +1,27 @@
+#!/bin/sh
+# live-build configuration for the runner's root filesystem. We only use the
+# kernel, initrd and squashfs that live-build produces; image/scripts/mkimage.sh
+# lays out the stick itself.
+set -e
+lb config noauto \
+  --mode debian \
+  --distribution "${DEBIAN_SUITE:-trixie}" \
+  --architectures amd64 \
+  --archive-areas "main contrib non-free-firmware" \
+  --linux-flavours amd64 \
+  --initramfs live-boot \
+  --apt-recommends false \
+  --apt-indices false \
+  --firmware-binary false \
+  --firmware-chroot false \
+  --debian-installer none \
+  --memtest none \
+  --security true \
+  --updates true \
+  --binary-images iso-hybrid \
+  --chroot-squashfs-compression-type zstd \
+  --iso-volume GHR \
+  --iso-application "USB GitHub Actions runner" \
+  --checksums none \
+  --zsync false \
+  "${@}"

@@ -1,0 +1,87 @@
+{{define "config"}}{{template "top" .}}
+{{$c := .Data.Cfg}}
+<section class="card">
+  <h1>GitHub registration</h1>
+  <p class="muted">Each worker slot registers as its own runner and takes one job at a time inside a fresh container that is deleted afterwards. Jobs have root and sudo inside that container only.</p>
+  <form method="post" action="/config" id="cfg-form">
+    <label>Repository or organization URL
+      <input name="url" value="{{$c.URL}}" placeholder="https://github.com/acme/app  or  https://github.com/acme" required>
+    </label>
+    <div class="cols">
+      <label>Runner group <span class="muted">(organizations only)</span>
+        <input name="runner_group" value="{{$c.RunnerGroup}}" placeholder="Default">
+      </label>
+      <label>Runner name <span class="muted">(slots add -1, -2, …)</span>
+        <input name="name_prefix" value="{{$c.NamePrefix}}" placeholder="{{.Hostname}}">
+      </label>
+    </div>
+    <label>Extra labels <span class="muted">(comma separated; always added: {{.Data.Always}})</span>
+      <input name="labels" value="{{.Data.Labels}}" placeholder="gpu, big-disk">
+    </label>
+    <div class="cols">
+      <label>Workers <span class="muted">(1–32, or auto = min(CPU threads ÷ 2, RAM GB ÷ 4))</span>
+        <input name="workers" value="{{$c.Workers}}" placeholder="auto" pattern="auto|[1-9]|[12][0-9]|3[0-2]">
+      </label>
+      <label>CPUs per slot <span class="muted">(blank = split evenly)</span>
+        <input name="slot_cpus" value="{{.Data.SlotCPUs}}" inputmode="decimal">
+      </label>
+      <label>Memory per slot, MB <span class="muted">(blank = split evenly)</span>
+        <input name="slot_memory_mb" value="{{.Data.SlotMemory}}" inputmode="numeric">
+      </label>
+    </div>
+
+    <fieldset>
+      <legend>Credential</legend>
+      <p class="muted small">Runners get a one-time config for every job, which needs a GitHub App or a fine-grained token that can manage self-hosted runners: <b>Administration: read and write</b> on a repository, or <b>Self-hosted runners: read and write</b> on an organization.</p>
+      <div class="row gap">
+        <label class="radio"><input type="radio" name="auth_type" value="app" {{if eq $c.Auth.Type "app"}}checked{{end}}> GitHub App (recommended)</label>
+        <label class="radio"><input type="radio" name="auth_type" value="pat" {{if eq $c.Auth.Type "pat"}}checked{{end}}> Fine-grained token</label>
+      </div>
+      <div data-auth="app">
+        <div class="cols">
+          <label>App ID or client ID<input name="app_id" value="{{$c.Auth.AppID}}"></label>
+          <label>Installation ID<input name="installation_id" value="{{$c.Auth.InstallationID}}"></label>
+        </div>
+        <label>Private key (.pem)
+          <textarea name="private_key" rows="4" placeholder="{{if .Data.HasKey}}Saved. Leave blank to keep it.{{else}}-----BEGIN RSA PRIVATE KEY-----{{end}}"></textarea>
+        </label>
+      </div>
+      <div data-auth="pat">
+        <label>Token<input type="password" name="pat" autocomplete="off" placeholder="{{if .Data.HasPAT}}Saved. Leave blank to keep it.{{else}}github_pat_…{{end}}"></label>
+      </div>
+    </fieldset>
+    <div class="row gap">
+      <button class="primary">Save and register</button>
+      <a class="button" href="/config/runner.env">Download runner.env</a>
+    </div>
+  </form>
+  {{if $c.URL}}
+  <form method="post" action="/config/remove" class="danger-zone" data-confirm="Remove this machine's runners from GitHub and clear these settings?">
+    <button class="danger">Remove runner</button>
+    <span class="muted small">Stops all slots and deregisters them from GitHub.</span>
+  </form>
+  {{end}}
+</section>
+
+<div class="cols">
+  <section class="card">
+    <h2>SSH</h2>
+    <form method="post" action="/config/ssh">
+      <label class="radio"><input type="checkbox" name="enabled" {{if $c.SSH.Enabled}}checked{{end}}> Allow SSH (key only, user <code>ghr</code>, port 22)</label>
+      <label>Authorized public keys, one per line
+        <textarea name="authorized_keys" rows="5" placeholder="ssh-ed25519 AAAA… you@laptop">{{$c.SSH.AuthorizedKeys}}</textarea>
+      </label>
+      <button>Save SSH settings</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Admin password</h2>
+    <form method="post" action="/config/password">
+      <label>Current password<input type="password" name="current" required autocomplete="current-password"></label>
+      <label>New password<input type="password" name="password" minlength="10" required autocomplete="new-password"></label>
+      <label>Repeat new password<input type="password" name="confirm" minlength="10" required autocomplete="new-password"></label>
+      <button>Change password</button>
+    </form>
+  </section>
+</div>
+{{template "bottom" .}}{{end}}
