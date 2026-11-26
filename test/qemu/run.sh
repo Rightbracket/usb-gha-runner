@@ -32,6 +32,16 @@ sudo chown -R "$(id -u)" "$work/disks"
 log "stick: copy of the image, grown to 64 GB (sparse)"
 cp --sparse=always "$img" stick.img
 truncate -s 64G stick.img
+# Send the guest's journal to the serial log, so a failed boot can be read
+# from CI output even if nothing reaches GHR-DATA.
+fat="stick.img@@$((2048 * 512))"
+for f in /boot/grub/grub.cfg /boot/syslinux/syslinux.cfg; do
+  mcopy -n -i "$fat" "::$f" boot.cfg
+  sed -i 's|console=ttyS0,115200n8 console=tty0|console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1|' boot.cfg
+  grep -q forward_to_console boot.cfg || { echo "could not patch $f"; exit 1; }
+  mcopy -o -i "$fat" boot.cfg "::$f"
+done
+rm -f boot.cfg
 
 accel=tcg cpu=max
 if [ -w /dev/kvm ]; then accel=kvm cpu=host; fi
@@ -46,9 +56,9 @@ fi
 
 boot() {
   local n=$1
-  rm -f qemu.pid
+  rm -f "$work/qemu.pid"
   qemu-system-x86_64 -name ghr-test -machine "q35,accel=$accel" -cpu "$cpu" -smp 4 -m 8192 \
-    "${fw[@]}" -display none -daemonize -pidfile qemu.pid \
+    "${fw[@]}" -display none -daemonize -pidfile "$work/qemu.pid" \
     -serial "file:serial-$mode-$n.log" -monitor "unix:$work/qemu.mon,server,nowait" \
     -device qemu-xhci -drive if=none,id=stick,file=stick.img,format=raw,cache=unsafe \
     -device usb-storage,drive=stick,bootindex=0 \
@@ -68,7 +78,7 @@ wait_up() {
 }
 wait_down() {
   for _ in $(seq 120); do
-    [ -e qemu.pid ] && kill -0 "$(cat qemu.pid)" 2>/dev/null || return 0
+    [ -e "$work/qemu.pid" ] && kill -0 "$(cat "$work/qemu.pid")" 2>/dev/null || return 0
     sleep 5
   done
   return 1
@@ -100,11 +110,11 @@ dump_journal() {
 stop_vm() {
   echo system_powerdown | socat - "UNIX-CONNECT:$work/qemu.mon" >/dev/null 2>&1 || true
   for _ in $(seq 36); do
-    [ -e qemu.pid ] && kill -0 "$(cat qemu.pid)" 2>/dev/null || return 0
+    [ -e "$work/qemu.pid" ] && kill -0 "$(cat "$work/qemu.pid")" 2>/dev/null || return 0
     sleep 5
   done
   echo "  (guest did not power off; killing QEMU)"
-  kill "$(cat qemu.pid)" 2>/dev/null || true
+  kill "$(cat "$work/qemu.pid")" 2>/dev/null || true
   sleep 5
 }
 
@@ -112,7 +122,8 @@ log "boot 1 ($mode, $accel)"
 boot 1
 if ! wait_up 180; then
   bad "web page never came up"
-  tail -n 80 "serial-$mode-1.log" || true
+  echo "  --- guest log: ghr, failures and errors ---"
+  grep -aE 'ghr|[Ff]ailed|error|sysbox|docker' "serial-$mode-1.log" | grep -av ssh-generator | tail -n 200 || true
   stop_vm
   dump_journal 1
   exit 1
@@ -160,7 +171,7 @@ c -o /dev/null -X POST "$BASE/actions/reboot"
 sleep 20
 if ! wait_up 180; then
   bad "did not come back after reboot"
-  tail -n 80 "serial-$mode-2.log" || true
+  grep -aE 'ghr|[Ff]ailed|error|sysbox|docker' "serial-$mode-2.log" | grep -av ssh-generator | tail -n 200 || true
   stop_vm
   dump_journal 2
   exit 1
@@ -178,7 +189,7 @@ fi
 
 log "power off"
 c -o /dev/null -X POST "$BASE/actions/poweroff"
-wait_down || { bad "did not power off"; kill "$(cat qemu.pid)" 2>/dev/null || true; sleep 5; }
+wait_down || { bad "did not power off"; kill "$(cat "$work/qemu.pid")" 2>/dev/null || true; sleep 5; }
 
 log "host disks unchanged"
 if (cd disks && sha256sum -c --quiet SHA256SUMS); then ok "all fake host disks are byte-for-byte unchanged"; else bad "a host disk changed"; fi
