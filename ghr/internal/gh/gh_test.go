@@ -202,3 +202,33 @@ func TestDeleteFollows307WithSameMethod(t *testing.T) {
 		t.Fatalf("requests: %v", methods)
 	}
 }
+
+// A renamed repo answers POSTs with a same-host 307; the JIT request must
+// follow it as a POST with its body.
+func TestJITFollows307WithBody(t *testing.T) {
+	var hops []string
+	var got map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hops = append(hops, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/api/v3/repos/acme/app/actions/runners/generate-jitconfig":
+			http.Redirect(w, r, "/api/v3/repositories/9/actions/runners/generate-jitconfig", http.StatusTemporaryRedirect)
+		case "/api/v3/repositories/9/actions/runners/generate-jitconfig":
+			json.NewDecoder(r.Body).Decode(&got)
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{"runner": map[string]any{"id": 42}, "encoded_jit_config": "ENC"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(&config.Config{URL: srv.URL + "/acme/app", Auth: config.Auth{Type: "pat", PAT: "tok"}})
+	c.http.Transport = srv.Client().Transport
+	enc, r, err := c.JITConfig(context.Background(), "ghr-3456-0123abcd-1", []string{"self-hosted"})
+	if err != nil || enc != "ENC" || r.ID != 42 {
+		t.Fatalf("enc=%q runner=%+v err=%v hops=%v", enc, r, err, hops)
+	}
+	if len(hops) != 2 || !strings.HasPrefix(hops[1], "POST ") || got["name"] != "ghr-3456-0123abcd-1" {
+		t.Fatalf("hops=%v body=%v", hops, got)
+	}
+}
