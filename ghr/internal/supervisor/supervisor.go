@@ -443,6 +443,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 			case err == nil:
 				deregistered = true
 			case gh.IsStatus(err, 422):
+				giveUpAt = time.Time{} // the deadline counts only errors in a row
 				s.write(SlotState{RunnerName: name, State: "draining", Job: j})
 				retry = time.After(5 * time.Second)
 				return
@@ -454,6 +455,13 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 				retry = time.After(10 * time.Second)
 				return
 			default:
+				mu.Lock()
+				b, j = busy, job // a job may have started during the request
+				mu.Unlock()
+				if b {
+					s.write(SlotState{RunnerName: name, State: "draining", Job: j})
+					return // the one-time container exits after the job
+				}
 				log.Printf("slot %d: GitHub didn't confirm runner %d is idle (%v); stopping it as idle", s.n, runnerID, err)
 				deregistered = true
 			}

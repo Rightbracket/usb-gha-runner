@@ -54,9 +54,10 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return fmt.Errorf("refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
 	}
-	if via[0].Method != http.MethodGet {
-		// Go would replay a DELETE or POST as a GET; report the redirect
-		// as an error instead of a success.
+	if req.Method != via[0].Method {
+		// On 301/302/303 Go replays a DELETE or POST as a GET; report the
+		// redirect as an error instead of a success. 307/308 keep the
+		// method (GitHub uses them for renamed repos) and are followed.
 		return http.ErrUseLastResponse
 	}
 	return nil

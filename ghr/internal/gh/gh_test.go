@@ -181,3 +181,24 @@ func TestDeleteRunnerNotFooledByTokenOr301(t *testing.T) {
 		t.Errorf("redirected DELETE: err=%v, followed with %d GETs", err, gets)
 	}
 }
+
+func TestDeleteFollows307WithSameMethod(t *testing.T) {
+	var methods []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method+" "+r.URL.Path)
+		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/") {
+			http.Redirect(w, r, "/api/v3/repositories/9/actions/runners/5", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	c, _ := New(&config.Config{URL: srv.URL + "/acme/app", Auth: config.Auth{Type: "pat", PAT: "tok"}})
+	c.http.Transport = srv.Client().Transport
+	if err := c.DeleteRunner(context.Background(), 5); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 2 || !strings.HasPrefix(methods[1], "DELETE /api/v3/repositories/9/") {
+		t.Fatalf("requests: %v", methods)
+	}
+}
