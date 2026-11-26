@@ -1,6 +1,8 @@
 [Unit]
 Description=GHR agent: GitHub Actions job slots in Sysbox containers
-Requires=docker.service ghr-data.service
+# No firewall, no jobs: nftables keeps job containers away from the web
+# page and SSH.
+Requires=docker.service ghr-data.service nftables.service
 Wants=network-online.target sysbox.service
 After=docker.service sysbox.service ghr-data.service ghr-import.service ghr-binfmt.service network-online.target nftables.service
 

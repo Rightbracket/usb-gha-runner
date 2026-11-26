@@ -11,7 +11,7 @@
       <label>Runner group <span class="muted">(organizations only)</span>
         <input name="runner_group" value="{{$c.RunnerGroup}}" placeholder="Default">
       </label>
-      <label>Runner name <span class="muted">(slots add -1, -2, …)</span>
+      <label>Name prefix <span class="muted">(runners are named PREFIX-{{.Hostname}}-&lt;stick ID&gt;-1, -2, …)</span>
         <input name="name_prefix" value="{{$c.NamePrefix}}" placeholder="{{.Hostname}}">
       </label>
     </div>

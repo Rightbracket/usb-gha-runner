@@ -50,6 +50,8 @@ type Agent struct {
 	collector *status.Collector
 	version   string
 	sv        *supervisor.Supervisor
+	// runnerHost is the per-stick part of runner names (config.RunnerHost).
+	runnerHost string
 }
 
 // Version returns the image release, used to tag the job image.
@@ -86,11 +88,16 @@ func Run(ctx context.Context) error {
 	go a.cacheLoop(ctx)
 
 	host, _ := os.Hostname()
+	rh, err := config.RunnerHost(host, config.StickIDPath)
+	if err != nil {
+		log.Printf("stick ID: %v; runner names use the hostname only", err)
+	}
+	a.runnerHost = rh
 	sv := &supervisor.Supervisor{
 		ConfigPath:     config.ConfigPath,
 		SlotsDir:       config.SlotsDir,
 		History:        config.HistoryPath,
-		Hostname:       host,
+		Hostname:       rh,
 		JobImage:       jobImage,
 		RegistryMirror: mirror,
 		// No jobs until someone owns the web page: otherwise a stick set up
@@ -234,17 +241,18 @@ func (a *Agent) remove(w http.ResponseWriter, r *http.Request) {
 	}
 	// Let the slot loops see the drain and exit before deregistering, so none
 	// of them registers a fresh runner behind our back.
+	var errs []string
 	if a.sv != nil {
-		a.sv.StopAll(45 * time.Second)
+		if err := a.sv.StopAll(45 * time.Second); err != nil {
+			errs = append(errs, err.Error())
+		}
 	}
 	stopSlots()
-	var errs []string
 	if cfg.Configured() {
 		if client, err := gh.New(cfg); err == nil {
-			host, _ := os.Hostname()
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
-			if n, err := client.DeleteSlotRunners(ctx, cfg.RunnerBase(host)); err != nil {
+			if n, err := client.DeleteSlotRunners(ctx, cfg.RunnerBase(a.runnerHost)); err != nil {
 				errs = append(errs, err.Error())
 			} else {
 				log.Printf("removed %d runner registrations", n)

@@ -33,8 +33,27 @@ log "boot stick is /dev/$disk (boot partition /dev/$bootpart)"
 # The GHR-BOOT partition itself stays read-only.
 blockdev --setrw "/dev/$disk"
 
-find_data() { lsblk -nrpo NAME,PARTLABEL "/dev/$disk" | awk '$2=="GHR-DATA" && !n++ {print $1}'; }
-datadev=$(find_data)
+# The partition is created as GHR-DATA-NEW and renamed GHR-DATA only after
+# mkfs succeeds, so a first boot cut short before then is recognised by its
+# label and formatted again. A GHR-DATA partition is never formatted.
+find_part() { lsblk -nrpo NAME,PARTLABEL "/dev/$disk" | awk -v l="$1" '$2==l && !n++ {print $1}'; }
+format_new() {
+  local dev=$1 num
+  [ "$(lsblk -ndo PKNAME "$dev")" = "$disk" ] || fail "$dev is not on the boot stick"
+  num=$(cat "/sys/class/block/${dev##*/}/partition")
+  blockdev --setrw "$dev"
+  mkfs.ext4 -q -F -L GHR-DATA -m 1 -E lazy_itable_init=1,lazy_journal_init=1 "$dev"
+  sgdisk -c "$num:GHR-DATA" "/dev/$disk" >/dev/null || fail "could not rename partition $num to GHR-DATA"
+  # Refresh udev's view of the label for later lookups; this boot uses $dev.
+  udevadm trigger --action=change "$dev" 2>/dev/null || true
+  udevadm settle -t 30 || true
+}
+datadev=$(find_part GHR-DATA)
+if [ -z "$datadev" ] && newdev=$(find_part GHR-DATA-NEW) && [ -n "$newdev" ]; then
+  log "$newdev was created but never finished formatting (interrupted first boot); formatting it"
+  format_new "$newdev"
+  datadev=$newdev
+fi
 if [ -z "$datadev" ]; then
   log "first boot: creating GHR-DATA in the free space of /dev/$disk"
   size=$(blockdev --getsize64 "/dev/$disk")
@@ -46,29 +65,19 @@ if [ -z "$datadev" ]; then
   sgdisk -e "/dev/$disk" >/dev/null || log "sgdisk -e returned $?"
   last=$(sgdisk -p "/dev/$disk" | awk '/^ +[0-9]+ / {n=$1} END {print n+0}')
   num=$((last + 1))
-  sgdisk -n "$num:0:0" -t "$num:8300" -c "$num:GHR-DATA" "/dev/$disk" >/dev/null || log "sgdisk -n returned $?"
+  sgdisk -n "$num:0:0" -t "$num:8300" -c "$num:GHR-DATA-NEW" "/dev/$disk" >/dev/null || log "sgdisk -n returned $?"
   # GHR-BOOT is mounted, so add just the new partition instead of re-reading the table.
   partx -a --nr "$num" "/dev/$disk" 2>/dev/null || partx -u "/dev/$disk" 2>/dev/null || true
   udevadm settle -t 30 || true
-  datadev=$(find_data)
-  [ -n "$datadev" ] || fail "created partition $num on /dev/$disk but it did not appear"
-  blockdev --setrw "$datadev"
-  mkfs.ext4 -q -F -L GHR-DATA -m 1 -E lazy_itable_init=1,lazy_journal_init=1 "$datadev"
+  newdev=$(find_part GHR-DATA-NEW)
+  [ -n "$newdev" ] || fail "created partition $num on /dev/$disk but it did not appear"
+  format_new "$newdev"
+  datadev=$newdev
 fi
 
 # Never mount anything that isn't on the boot stick.
 [ "$(lsblk -ndo PKNAME "$datadev")" = "$disk" ] || fail "$datadev is not on the boot stick"
 blockdev --setrw "$datadev"
-# A first boot interrupted between creating and formatting the partition
-# leaves it empty; format it now instead of failing on every boot.
-# blkid exits 2 only when it finds no signature at all; any other failure
-# must not lead to formatting.
-probe=0
-blkid -p "$datadev" >/dev/null 2>&1 || probe=$?
-if [ "$probe" -eq 2 ]; then
-  log "$datadev has no filesystem (interrupted first boot?); formatting it"
-  mkfs.ext4 -q -F -L GHR-DATA -m 1 -E lazy_itable_init=1,lazy_journal_init=1 "$datadev"
-fi
 rc=0
 e2fsck -p "$datadev" || rc=$?
 [ "$rc" -le 2 ] || fail "e2fsck found errors it couldn't fix on $datadev (exit $rc)"

@@ -57,7 +57,8 @@ type Supervisor struct {
 	ConfigPath string
 	SlotsDir   string
 	History    string
-	Hostname   string
+	// Hostname is the per-stick part of runner names (config.RunnerHost).
+	Hostname string
 	// JobImage is the per-job container image, e.g. ghr-job:0.1.0.
 	JobImage string
 	// RegistryMirror, when set, is passed to each job's inner dockerd as a
@@ -153,7 +154,7 @@ func (sv *Supervisor) drainAll() {
 // StopAll drains every slot and waits for them to exit, for "Remove".
 // The caller must already have saved an unconfigured config, so the
 // supervisor doesn't start new slots afterwards.
-func (sv *Supervisor) StopAll(timeout time.Duration) {
+func (sv *Supervisor) StopAll(timeout time.Duration) error {
 	sv.drainAll()
 	done := make(chan struct{})
 	go func() {
@@ -165,7 +166,9 @@ func (sv *Supervisor) StopAll(timeout time.Duration) {
 	}()
 	select {
 	case <-done:
+		return nil
 	case <-time.After(timeout):
+		return fmt.Errorf("%d job slots still running after %s", sv.count(), timeout)
 	}
 }
 
@@ -280,6 +283,14 @@ func (s *slot) loop(ctx context.Context) {
 			}
 			backoff = min(backoff*2, 5*time.Minute)
 			continue
+		}
+		if s.draining() || ctx.Err() != nil {
+			// Drained while the JIT request was in flight: don't start a
+			// runner that could take a job, and make GitHub forget it.
+			dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = client.DeleteRunner(dctx, runner.ID)
+			cancel()
+			return
 		}
 		ranJob, err := s.runContainer(ctx, client, container, name, jit, runner.ID)
 		if err != nil {

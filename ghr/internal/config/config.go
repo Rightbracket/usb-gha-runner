@@ -4,6 +4,8 @@ package config
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,7 @@ const (
 	SlotsDir    = "/run/ghr/slots"
 	HistoryPath = "/data/ghr/history.jsonl"
 	BootDiskRun = "/run/ghr/boot-disk"
+	StickIDPath = "/data/etc/ghr/stick-id"
 	MaxWorkers  = 32
 )
 
@@ -270,13 +273,59 @@ func sameHost(a, b string) bool {
 }
 
 // RunnerBase is the start of every runner name this machine registers:
-// "<hostname>" or "<prefix>-<hostname>". The hostname (ghr-XXXX, from the
-// MAC address) keeps names unique when several sticks share a prefix.
-func (c *Config) RunnerBase(hostname string) string {
-	if c.NamePrefix == "" || c.NamePrefix == hostname {
-		return hostname
+// "<host>" or "<prefix>-<host>", where host is RunnerHost's result.
+func (c *Config) RunnerBase(host string) string {
+	if c.NamePrefix == "" || c.NamePrefix == host {
+		return host
 	}
-	return c.NamePrefix + "-" + hostname
+	return c.NamePrefix + "-" + host
+}
+
+// RunnerHost is the per-stick part of runner names: the hostname
+// (ghr-XXXX, only 16 bits of the MAC, shared by every VM with a default
+// MAC) plus a random ID created once and kept on the stick at path, so
+// sticks that share a prefix or a MAC suffix never claim each other's
+// runners. If the ID can't be read or stored, it falls back to the
+// hostname alone and returns the error.
+func RunnerHost(hostname, path string) (string, error) {
+	id, err := stickID(path)
+	if err != nil {
+		return hostname, err
+	}
+	return hostname + "-" + id, nil
+}
+
+func stickID(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		id := strings.TrimSpace(string(b))
+		if len(id) == 8 && isHex(id) {
+			return id, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(buf)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return id, os.Rename(tmp, path)
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseEnvFile reads runner.env (KEY=VALUE lines, # comments, optional quotes).

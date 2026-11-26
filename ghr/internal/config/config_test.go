@@ -140,6 +140,23 @@ func TestRunnerBase(t *testing.T) {
 	}
 }
 
+func TestRunnerHostStable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "etc", "stick-id")
+	a, err := RunnerHost("ghr-3456", p)
+	if err != nil || !strings.HasPrefix(a, "ghr-3456-") || len(a) != len("ghr-3456-")+8 {
+		t.Fatalf("%q %v", a, err)
+	}
+	b, err := RunnerHost("ghr-3456", p)
+	if err != nil || a != b {
+		t.Fatalf("ID changed between calls: %q %q %v", a, b, err)
+	}
+	q := filepath.Join(t.TempDir(), "stick-id")
+	c, _ := RunnerHost("ghr-3456", q)
+	if c == a {
+		t.Fatalf("two sticks with the same hostname got the same name %q", c)
+	}
+}
+
 func TestLoadSave(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "sub", "config.json")
 	c, err := Load(p)
