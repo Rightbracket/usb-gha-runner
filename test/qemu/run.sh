@@ -49,7 +49,7 @@ boot() {
   rm -f qemu.pid
   qemu-system-x86_64 -name ghr-test -machine "q35,accel=$accel" -cpu "$cpu" -smp 4 -m 8192 \
     "${fw[@]}" -display none -daemonize -pidfile qemu.pid \
-    -serial "file:serial-$mode-$n.log" \
+    -serial "file:serial-$mode-$n.log" -monitor "unix:$work/qemu.mon,server,nowait" \
     -device qemu-xhci -drive if=none,id=stick,file=stick.img,format=raw,cache=unsafe \
     -device usb-storage,drive=stick,bootindex=0 \
     -drive if=none,id=d1,file=disks/ext4.img,format=raw -device virtio-blk-pci,drive=d1 \
@@ -82,9 +82,11 @@ dump_journal() {
   start=$(sgdisk -p stick.img | awk '$NF == "GHR-DATA" {print $2}')
   if [ -z "$start" ]; then echo "  (no GHR-DATA partition, so no journal)"; return 0; fi
   mnt=$(mktemp -d)
-  if sudo mount -o ro,noload,loop,offset=$((start * 512)) stick.img "$mnt"; then
+  if sudo mount -o ro,loop,offset=$((start * 512)) stick.img "$mnt"; then
     # shellcheck disable=SC2024 # the file is meant to be ours, not root's
     sudo journalctl -D "$mnt/log/journal" --no-pager -o short-monotonic >"journal-$mode-$n.txt" 2>&1 || true
+    sudo find "$mnt/log/journal" -ls | head -n 20
+    head -n 3 "journal-$mode-$n.txt"
     echo "  --- failed units and ghr services (full journal in journal-$mode-$n.txt) ---"
     grep -E 'Failed|failed|ghr|sysbox|docker|error' "journal-$mode-$n.txt" | grep -v 'systemd-ssh-generator' | tail -n 150 || true
     sudo umount "$mnt"
@@ -93,9 +95,17 @@ dump_journal() {
   fi
   rmdir "$mnt"
 }
+# Ask the guest to shut down (ACPI power button) so its journal and GHR-DATA
+# are written out cleanly; kill it only if that doesn't work.
 stop_vm() {
+  echo system_powerdown | socat - "UNIX-CONNECT:$work/qemu.mon" >/dev/null 2>&1 || true
+  for _ in $(seq 36); do
+    [ -e qemu.pid ] && kill -0 "$(cat qemu.pid)" 2>/dev/null || return 0
+    sleep 5
+  done
+  echo "  (guest did not power off; killing QEMU)"
   kill "$(cat qemu.pid)" 2>/dev/null || true
-  wait_down || true
+  sleep 5
 }
 
 log "boot 1 ($mode, $accel)"
