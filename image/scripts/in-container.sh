@@ -18,7 +18,11 @@ lb config
 # live-config would add an autologin user, so install live-boot only.
 echo "live-boot" >config/package-lists/live.list.chroot
 lb build 2>&1 | tee /out/live-build.log | grep -E '^(P:|E:|W:)' || true
-test -f binary/live/filesystem.squashfs || { echo "live-build did not produce a squashfs; see out/live-build.log" >&2; exit 1; }
+if [ ! -f binary/live/filesystem.squashfs ]; then
+  echo "live-build did not produce a squashfs. Last lines of out/live-build.log:" >&2
+  tail -n 120 /out/live-build.log >&2
+  exit 1
+fi
 
 live=/out/live
 mkdir -p "$live"

@@ -4,9 +4,9 @@ set -eu
 
 # --- Sysbox (not packaged in Debian). build.sh downloads and verifies the
 # .deb; its postinst can't run in a chroot, so unpack it and do its setup here.
-if [ -f /tmp/ghr/sysbox.deb ]; then
-  dpkg-deb -x /tmp/ghr/sysbox.deb /
-  rm -rf /tmp/ghr
+if [ -f /var/cache/ghr/sysbox.deb ]; then
+  dpkg-deb -x /var/cache/ghr/sysbox.deb /
+  rm -rf /var/cache/ghr
 fi
 command -v sysbox-runc >/dev/null || { echo "sysbox-runc missing" >&2; exit 1; }
 id sysbox >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sysbox

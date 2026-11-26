@@ -50,10 +50,10 @@ trap cleanup EXIT
 cp -a "$root/image/lb" "$work/lb"
 inc="$work/lb/config/includes.chroot"
 install -D -m 0755 "$out/ghr" "$inc/usr/local/bin/ghr"
-install -d "$inc/usr/share/ghr" "$inc/tmp/ghr"
+install -d "$inc/usr/share/ghr" "$inc/var/cache/ghr"
 echo "$VERSION" >"$inc/usr/share/ghr/version"
-curl -fsSL -o "$inc/tmp/ghr/sysbox.deb" "$sysbox_url"
-sysbox_sha=$(sha256sum "$inc/tmp/ghr/sysbox.deb" | cut -d' ' -f1)
+curl -fsSL -o "$inc/var/cache/ghr/sysbox.deb" "$sysbox_url"
+sysbox_sha=$(sha256sum "$inc/var/cache/ghr/sysbox.deb" | cut -d' ' -f1)
 if [ -n "${SYSBOX_SHA256}" ] && [ "$SYSBOX_SHA256" != "$sysbox_sha" ]; then
   echo "sysbox .deb SHA-256 is $sysbox_sha, expected $SYSBOX_SHA256" >&2
   exit 1
