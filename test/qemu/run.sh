@@ -179,11 +179,16 @@ else
   ok "back after reboot"
   [ "$(c "$BASE/api/health" | jq -r .password_set)" = true ] && ok "password survived" || bad "password lost"
   rm -f "$jar"
-  code=$(c -o /dev/null -w '%{http_code}' --data-urlencode "password=$PASSWORD" "$BASE/login")
-  [ "$code" = 303 ] && [ "$(c -o /dev/null -w '%{http_code}' "$BASE/api/status")" = 200 ] && ok "login works" || bad "login failed"
+  login=$(c -o /dev/null -w '%{http_code} %{redirect_url}' --data-urlencode "password=$PASSWORD" "$BASE/login")
+  scode=$(c -o /dev/null -w '%{http_code}' "$BASE/api/status")
+  if [ "${login%% *}" = 303 ] && [ "$scode" = 200 ]; then ok "login works"; else
+    bad "login failed (login: $login; status: $scode)"
+    echo "  cookie jar:"; grep -v '^# ' "$jar" | sed 's/\t[^\t]*$/\t<value>/' || true
+    grep -aE 'ghr-web|ghr web|web\[' "serial-$mode-2.log" | tail -n 40 || true
+  fi
   fp2=$(echo | openssl s_client -connect "127.0.0.1:$PORT" 2>/dev/null | openssl x509 -noout -fingerprint -sha256)
   [ -n "$fp1" ] && [ "$fp1" = "$fp2" ] && ok "same TLS certificate" || bad "certificate changed ($fp1 / $fp2)"
-  st=$(status); echo "$st" | jq . >"status-$mode-2.json"
+  st=$(status || true); echo "$st" | jq . >"status-$mode-2.json" || true
   jq -e '.disks_ok == true' <<<"$st" >/dev/null && ok "host disks still protected" || bad "host disks after reboot"
 fi
 
