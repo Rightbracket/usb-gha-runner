@@ -180,8 +180,14 @@ else
   [ "$(c "$BASE/api/health" | jq -r .password_set)" = true ] && ok "password survived" || bad "password lost"
   rm -f "$jar"
   login=$(c -o /dev/null -w '%{http_code} %{redirect_url}' --data-urlencode "password=$PASSWORD" "$BASE/login")
-  scode=$(c -o /dev/null -w '%{http_code}' "$BASE/api/status")
-  if [ "${login%% *}" = 303 ] && [ "$scode" = 200 ]; then ok "login works"; else
+  # /api/status needs ghr-agent, which may still be loading images; a 401
+  # means the login didn't take, anything else is the agent starting.
+  for _ in $(seq 60); do
+    scode=$(c -o /dev/null -w '%{http_code}' "$BASE/api/status")
+    [ "$scode" = 200 ] || [ "$scode" = 401 ] && break
+    sleep 5
+  done
+  if [ "${login%% *}" = 303 ] && [[ $login != *err=* ]] && [ "$scode" = 200 ]; then ok "login works"; else
     bad "login failed (login: $login; status: $scode)"
     echo "  cookie jar:"; grep -v '^# ' "$jar" | sed 's/\t[^\t]*$/\t<value>/' || true
     grep -aE 'ghr-web|ghr web|web\[' "serial-$mode-2.log" | tail -n 40 || true
