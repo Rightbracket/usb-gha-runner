@@ -54,6 +54,11 @@ func sameOriginRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return fmt.Errorf("refusing redirect to %s://%s", req.URL.Scheme, req.URL.Host)
 	}
+	if via[0].Method != http.MethodGet {
+		// Go would replay a DELETE or POST as a GET; report the redirect
+		// as an error instead of a success.
+		return http.ErrUseLastResponse
+	}
 	return nil
 }
 
@@ -212,9 +217,13 @@ func (c *Client) FindRunner(ctx context.Context, name string) (*Runner, error) {
 }
 
 func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
-	err := c.call(ctx, http.MethodDelete, c.runnersPath()+"/"+strconv.FormatInt(id, 10), nil, nil)
+	tok, err := c.authToken(ctx)
+	if err != nil {
+		return err // even a 404 here means nothing was deleted
+	}
+	err = c.do(ctx, "Bearer "+tok, http.MethodDelete, c.runnersPath()+"/"+strconv.FormatInt(id, 10), nil, nil)
 	if IsStatus(err, 404) {
-		return nil
+		return nil // already gone
 	}
 	return err
 }

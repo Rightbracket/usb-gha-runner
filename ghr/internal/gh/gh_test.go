@@ -146,3 +146,38 @@ func TestNoCredentialOnCrossHostRedirect(t *testing.T) {
 	default:
 	}
 }
+
+func TestDeleteRunnerNotFooledByTokenOr301(t *testing.T) {
+	// A 404 from the App token request is not "already deleted".
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	pemKey := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	c, err := New(&config.Config{URL: srv.URL + "/acme/app", Auth: config.Auth{Type: "app", AppID: "1", InstallationID: "2", PrivateKey: pemKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http.Transport = srv.Client().Transport
+	if err := c.DeleteRunner(context.Background(), 5); err == nil {
+		t.Error("token 404 reported as a successful delete")
+	}
+
+	// A redirected DELETE must not turn into a GET that "succeeds".
+	var gets int
+	srv2 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" {
+			http.Redirect(w, r, "/moved"+r.URL.Path, http.StatusMovedPermanently)
+			return
+		}
+		gets++
+		w.WriteHeader(200)
+	}))
+	defer srv2.Close()
+	c2, _ := New(&config.Config{URL: srv2.URL + "/acme/app", Auth: config.Auth{Type: "pat", PAT: "tok"}})
+	c2.http.Transport = srv2.Client().Transport
+	if err := c2.DeleteRunner(context.Background(), 5); err == nil || gets != 0 {
+		t.Errorf("redirected DELETE: err=%v, followed with %d GETs", err, gets)
+	}
+}

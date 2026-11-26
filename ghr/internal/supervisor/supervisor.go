@@ -345,9 +345,10 @@ func (s *slot) jit(ctx context.Context, client *gh.Client, name string) (string,
 }
 
 var (
-	reListening = regexp.MustCompile(`Listening for Jobs`)
-	reRunning   = regexp.MustCompile(`Running job: (.+)$`)
-	reDone      = regexp.MustCompile(`Job (.+) completed with result: (\w+)`)
+	// The runner prints "2026-11-26 18:00:00Z: <message>". Markers are
+	// anchored to the start of the message, since job names (chosen by
+	// workflow authors) can contain the same words.
+	reMarker = regexp.MustCompile(`^(?:\S+ \S+Z: )?(?:(Listening for Jobs)|Running job: (.+)|Job (.+) completed with result: (\w+))$`)
 )
 
 // runContainer runs one job container and reports whether a job was started.
@@ -385,22 +386,20 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		defer close(readDone)
 		readLines(pr, 1024*1024, func(line string) {
 			fmt.Printf("[slot %d] %s\n", s.n, line) // to the journal
-			// Job markers first: job names are chosen by workflow authors.
-			switch {
-			case reRunning.MatchString(line):
+			kind, a, b := classify(line)
+			switch kind {
+			case lineRunning:
 				mu.Lock()
-				busy, ranJob, job, started = true, true, strings.TrimSpace(reRunning.FindStringSubmatch(line)[1]), time.Now()
+				busy, ranJob, job, started = true, true, a, time.Now()
 				mu.Unlock()
-				s.write(SlotState{RunnerName: name, State: "busy", Job: job})
-			case reDone.MatchString(line):
-				m := reDone.FindStringSubmatch(line)
+				s.write(SlotState{RunnerName: name, State: "busy", Job: a})
+			case lineDone:
 				mu.Lock()
 				busy = false
 				sec := int(time.Since(started).Seconds())
 				mu.Unlock()
-				s.parent.appendHistory(HistoryEntry{Time: time.Now(), Slot: s.n, RunnerName: name, Job: strings.TrimSpace(m[1]), Result: m[2], Seconds: sec})
-			// Last, so a job whose name contains the phrase still counts.
-			case reListening.MatchString(line):
+				s.parent.appendHistory(HistoryEntry{Time: time.Now(), Slot: s.n, RunnerName: name, Job: a, Result: b, Seconds: sec})
+			case lineListening:
 				st := "idle"
 				if s.draining() {
 					st = "draining"
@@ -420,28 +419,44 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 	stopping := false // shutting down: stop even a busy runner
 	deregistered := false
 	draining := false
+	var giveUpAt time.Time // when to stop waiting for GitHub to answer
 	act := func() {
 		retry = nil
 		mu.Lock()
-		b := busy
+		b, j := busy, job
 		mu.Unlock()
 		if b && !stopping {
-			s.write(SlotState{RunnerName: name, State: "draining", Job: job})
+			s.write(SlotState{RunnerName: name, State: "draining", Job: j})
 			return // let the job finish
 		}
 		if !stopping && !deregistered {
 			// GitHub may have handed the runner a job it hasn't printed yet.
-			// Deleting the runner is refused while it has one, so only an
-			// idle runner gets stopped; a busy one is left to finish.
+			// Deleting the runner is refused (422) while it has one, so
+			// only a runner GitHub agrees is idle gets stopped.
+			if giveUpAt.IsZero() {
+				giveUpAt = time.Now().Add(60 * time.Second)
+			}
 			dctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err := client.DeleteRunner(dctx, runnerID)
 			cancel()
-			if err != nil && !gh.IsStatus(err, 404) {
-				s.write(SlotState{RunnerName: name, State: "draining", Job: job})
+			switch {
+			case err == nil:
+				deregistered = true
+			case gh.IsStatus(err, 422):
+				s.write(SlotState{RunnerName: name, State: "draining", Job: j})
 				retry = time.After(5 * time.Second)
 				return
+			case time.Now().Before(giveUpAt):
+				// GitHub can't answer (revoked credential, outage, rate
+				// limit); retry for a while, then go by what we see locally.
+				log.Printf("slot %d: deregister runner %d before stopping: %v", s.n, runnerID, err)
+				s.write(SlotState{RunnerName: name, State: "draining", Job: j, LastError: err.Error()})
+				retry = time.After(10 * time.Second)
+				return
+			default:
+				log.Printf("slot %d: GitHub didn't confirm runner %d is idle (%v); stopping it as idle", s.n, runnerID, err)
+				deregistered = true
 			}
-			deregistered = true
 		}
 		stop()
 		retry = time.After(time.Second)
@@ -532,5 +547,29 @@ func readLines(r io.Reader, max int, fn func(string)) {
 		if err != nil {
 			return
 		}
+	}
+}
+
+const (
+	lineOther = iota
+	lineListening
+	lineRunning
+	lineDone
+)
+
+// classify recognises the runner's status lines. For lineRunning, a is
+// the job name; for lineDone, a is the job name and b the result.
+func classify(line string) (kind int, a, b string) {
+	m := reMarker.FindStringSubmatch(strings.TrimSpace(line))
+	switch {
+	case m == nil:
+		return lineOther, "", ""
+	case m[1] != "":
+		return lineListening, "", ""
+	case m[2] != "":
+		// "Job x completed with result: y" can't also start with "Running job: ".
+		return lineRunning, strings.TrimSpace(m[2]), ""
+	default:
+		return lineDone, strings.TrimSpace(m[3]), m[4]
 	}
 }
