@@ -368,8 +368,11 @@ func ensureMirror() string {
 		log.Printf("mirror: %s not loaded; skipping", MirrorImage)
 		return ""
 	}
-	running, _ := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", MirrorName).Output()
-	if strings.TrimSpace(string(running)) != "true" {
+	// The container survives an upgrade with /data, and --restart=always
+	// brings it back at boot, so it is replaced when it runs another image.
+	want, _ := exec.Command("docker", "image", "inspect", "-f", "{{.Id}}", MirrorImage).Output()
+	state, _ := exec.Command("docker", "inspect", "-f", "{{.State.Running}} {{.Image}}", MirrorName).Output()
+	if mirrorStale(string(state), string(want)) {
 		_ = exec.Command("docker", "rm", "-f", MirrorName).Run()
 		_ = os.MkdirAll(MirrorDir, 0o755)
 		cmd := exec.Command("docker", "run", "-d", "--restart=always", "--name", MirrorName,
@@ -384,6 +387,15 @@ func ensureMirror() string {
 		}
 	}
 	return "http://" + gw + ":5000"
+}
+
+// mirrorStale reports whether the mirror container must be recreated, given
+// its "{{.State.Running}} {{.Image}}" (empty if it doesn't exist) and the
+// image ID that MirrorImage resolves to now.
+func mirrorStale(state, wantID string) bool {
+	f := strings.Fields(state)
+	want := strings.TrimSpace(wantID)
+	return len(f) != 2 || f[0] != "true" || want == "" || f[1] != want
 }
 
 // cacheLoop records builder cache size for the status page every 10 minutes.
