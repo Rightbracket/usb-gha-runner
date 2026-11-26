@@ -52,6 +52,34 @@ type Agent struct {
 	sv        *supervisor.Supervisor
 	// runnerHost is the per-stick part of runner names (config.RunnerHost).
 	runnerHost string
+
+	// Test seams; zero values mean the real config file, GitHub client and
+	// docker CLI.
+	configPath string
+	newClient  func(*config.Config) (*gh.Client, error)
+	killSlots  func()
+}
+
+func (a *Agent) cfgPath() string {
+	if a.configPath != "" {
+		return a.configPath
+	}
+	return config.ConfigPath
+}
+
+func (a *Agent) client(cfg *config.Config) (*gh.Client, error) {
+	if a.newClient != nil {
+		return a.newClient(cfg)
+	}
+	return gh.New(cfg)
+}
+
+func (a *Agent) removeSlotContainers() {
+	if a.killSlots != nil {
+		a.killSlots()
+		return
+	}
+	stopSlots()
 }
 
 // Version returns the image release, used to tag the job image.
@@ -212,7 +240,7 @@ func (a *Agent) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
-	old, err := config.Load(config.ConfigPath)
+	old, err := config.Load(a.cfgPath())
 	if err != nil {
 		httpErr(w, err, 500)
 		return
@@ -225,7 +253,7 @@ func (a *Agent) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Check the credential before saving, so a typo shows up on the page
 	// instead of as a slot error loop.
-	client, err := gh.New(&in)
+	client, err := a.client(&in)
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		err = client.Check(ctx)
@@ -235,7 +263,7 @@ func (a *Agent) putConfig(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, fmt.Errorf("GitHub rejected the settings: %w", err), 400)
 		return
 	}
-	if err := config.Save(config.ConfigPath, &in); err != nil {
+	if err := config.Save(a.cfgPath(), &in); err != nil {
 		httpErr(w, err, 500)
 		return
 	}
@@ -247,13 +275,13 @@ func (a *Agent) putConfig(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) remove(w http.ResponseWriter, r *http.Request) {
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
-	cfg, err := config.Load(config.ConfigPath)
+	cfg, err := config.Load(a.cfgPath())
 	if err != nil {
 		httpErr(w, err, 500)
 		return
 	}
 	cleared := &config.Config{Workers: "auto", Auth: config.Auth{Type: "app"}, SSH: cfg.SSH}
-	if err := config.Save(config.ConfigPath, cleared); err != nil {
+	if err := config.Save(a.cfgPath(), cleared); err != nil {
 		httpErr(w, err, 500)
 		return
 	}
@@ -265,9 +293,9 @@ func (a *Agent) remove(w http.ResponseWriter, r *http.Request) {
 			errs = append(errs, err.Error())
 		}
 	}
-	stopSlots()
+	a.removeSlotContainers()
 	if cfg.Configured() {
-		if client, err := gh.New(cfg); err == nil {
+		if client, err := a.client(cfg); err == nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
 			if n, err := client.DeleteSlotRunners(ctx, cfg.RunnerBase(a.runnerHost)); err != nil {

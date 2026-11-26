@@ -72,6 +72,69 @@ type Supervisor struct {
 	slots map[int]*slot
 	wg    sync.WaitGroup
 	hmu   sync.Mutex
+
+	// Test seams; when nil or zero, the real GitHub client, docker CLI,
+	// clock and poll interval are used.
+	newClient func(*config.Config) (runnerAPI, error)
+	startJob  func(args, env []string) (io.Reader, <-chan error, error)
+	docker    func(args ...string) error
+	now       func() time.Time
+	after     func(time.Duration) <-chan time.Time
+	poll      time.Duration
+}
+
+// runnerAPI is the part of gh.Client the slots use.
+type runnerAPI interface {
+	JITConfig(ctx context.Context, name string, labels []string) (string, gh.Runner, error)
+	FindRunner(ctx context.Context, name string) (*gh.Runner, error)
+	DeleteRunner(ctx context.Context, id int64) error
+}
+
+func (sv *Supervisor) client(cfg *config.Config) (runnerAPI, error) {
+	if sv.newClient != nil {
+		return sv.newClient(cfg)
+	}
+	return gh.New(cfg)
+}
+
+func (sv *Supervisor) runDocker(args ...string) error {
+	if sv.docker != nil {
+		return sv.docker(args...)
+	}
+	return exec.Command("docker", args...).Run()
+}
+
+func (sv *Supervisor) clockNow() time.Time {
+	if sv.now != nil {
+		return sv.now()
+	}
+	return time.Now()
+}
+
+func (sv *Supervisor) timer(d time.Duration) <-chan time.Time {
+	if sv.after != nil {
+		return sv.after(d)
+	}
+	return time.After(d)
+}
+
+// start runs "docker <args>" with env and returns its combined output and
+// a channel that gets its exit status once the output is closed.
+func (sv *Supervisor) start(args, env []string) (io.Reader, <-chan error, error) {
+	if sv.startJob != nil {
+		return sv.startJob(args, env)
+	}
+	cmd := exec.Command("docker", args...)
+	cmd.Env = env
+	pr, pw := io.Pipe()
+	cmd.Stdout, cmd.Stderr = pw, pw
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		return nil, nil, err
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait(); pw.Close() }()
+	return pr, waitErr, nil
 }
 
 type slot struct {
@@ -89,11 +152,17 @@ func (s *slot) startDrain() { s.once.Do(func() { close(s.drain) }) }
 
 // Run blocks until ctx is cancelled, reconciling slots with the config file.
 func (sv *Supervisor) Run(ctx context.Context) error {
+	sv.mu.Lock()
 	sv.slots = map[int]*slot{}
+	sv.mu.Unlock()
 	_ = os.MkdirAll(sv.SlotsDir, 0o755)
 	var cur *config.Config
 	var curMod time.Time
-	t := time.NewTicker(pollInterval)
+	poll := sv.poll
+	if poll <= 0 {
+		poll = pollInterval
+	}
+	t := time.NewTicker(poll)
 	defer t.Stop()
 	wasReady := true
 	for {
@@ -266,13 +335,13 @@ func (s *slot) loop(ctx context.Context) {
 	container := "ghr-slot-" + strconv.Itoa(s.n)
 	defer s.write(SlotState{RunnerName: name, State: "stopped"})
 	backoff := 5 * time.Second
-	client, err := gh.New(s.cfg)
+	client, err := s.parent.client(s.cfg)
 	if err != nil {
 		s.write(SlotState{RunnerName: name, State: "error", LastError: err.Error()})
 		return
 	}
 	for !s.draining() && ctx.Err() == nil {
-		_ = exec.Command("docker", "rm", "-f", container).Run()
+		_ = s.parent.runDocker("rm", "-f", container)
 		s.write(SlotState{RunnerName: name, State: "starting"})
 		jit, runner, err := s.jit(ctx, client, name)
 		if err != nil {
@@ -328,7 +397,7 @@ func (s *slot) sleep(ctx context.Context, d time.Duration) bool {
 }
 
 // jit gets a JIT config, removing a stale runner with the same name if needed.
-func (s *slot) jit(ctx context.Context, client *gh.Client, name string) (string, gh.Runner, error) {
+func (s *slot) jit(ctx context.Context, client runnerAPI, name string) (string, gh.Runner, error) {
 	enc, r, err := client.JITConfig(ctx, name, s.cfg.AllLabels())
 	if gh.IsStatus(err, 409) {
 		if old, ferr := client.FindRunner(ctx, name); ferr == nil && old != nil {
@@ -352,7 +421,7 @@ var (
 )
 
 // runContainer runs one job container and reports whether a job was started.
-func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, name, jit string, runnerID int64) (bool, error) {
+func (s *slot) runContainer(ctx context.Context, client runnerAPI, container, name, jit string, runnerID int64) (bool, error) {
 	args := []string{"run", "--rm", "--name", container,
 		"--runtime=" + Runtime,
 		// The runner name can be longer than the 64-byte hostname limit.
@@ -363,16 +432,12 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		"-e", "GHR_JITCONFIG",
 		"-e", "GHR_REGISTRY_MIRROR",
 		s.parent.JobImage}
-	cmd := exec.Command("docker", args...)
 	// Passed by name so the secret never appears in the process list.
-	cmd.Env = append(os.Environ(), "GHR_JITCONFIG="+jit, "GHR_REGISTRY_MIRROR="+s.parent.RegistryMirror)
-	pr, pw := io.Pipe()
-	cmd.Stdout, cmd.Stderr = pw, pw
-	if err := cmd.Start(); err != nil {
+	env := append(os.Environ(), "GHR_JITCONFIG="+jit, "GHR_REGISTRY_MIRROR="+s.parent.RegistryMirror)
+	pr, waitErr, err := s.parent.start(args, env)
+	if err != nil {
 		return false, fmt.Errorf("start container: %w", err)
 	}
-	waitErr := make(chan error, 1)
-	go func() { waitErr <- cmd.Wait(); pw.Close() }()
 
 	readDone := make(chan struct{})
 	var (
@@ -412,7 +477,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 	// docker stop can miss a container that is still being created (it
 	// fails, or succeeds on one not yet started), so keep stopping every
 	// second until the container has exited.
-	stop := func() { _ = exec.Command("docker", "stop", "-t", "30", container).Run() }
+	stop := func() { _ = s.parent.runDocker("stop", "-t", "30", container) }
 	drainCh := s.drain
 	ctxDone := ctx.Done()
 	var retry <-chan time.Time
@@ -434,7 +499,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 			// Deleting the runner is refused (422) while it has one, so
 			// only a runner GitHub agrees is idle gets stopped.
 			if giveUpAt.IsZero() {
-				giveUpAt = time.Now().Add(60 * time.Second)
+				giveUpAt = s.parent.clockNow().Add(60 * time.Second)
 			}
 			dctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err := client.DeleteRunner(dctx, runnerID)
@@ -445,14 +510,14 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 			case gh.IsStatus(err, 422):
 				giveUpAt = time.Time{} // the deadline counts only errors in a row
 				s.write(SlotState{RunnerName: name, State: "draining", Job: j})
-				retry = time.After(5 * time.Second)
+				retry = s.parent.timer(5 * time.Second)
 				return
-			case time.Now().Before(giveUpAt):
+			case s.parent.clockNow().Before(giveUpAt):
 				// GitHub can't answer (revoked credential, outage, rate
 				// limit); retry for a while, then go by what we see locally.
 				log.Printf("slot %d: deregister runner %d before stopping: %v", s.n, runnerID, err)
 				s.write(SlotState{RunnerName: name, State: "draining", Job: j, LastError: err.Error()})
-				retry = time.After(10 * time.Second)
+				retry = s.parent.timer(10 * time.Second)
 				return
 			default:
 				mu.Lock()
@@ -467,7 +532,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 			}
 		}
 		stop()
-		retry = time.After(time.Second)
+		retry = s.parent.timer(time.Second)
 	}
 	for {
 		select {

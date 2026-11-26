@@ -243,3 +243,56 @@ func TestJITFollows307WithBody(t *testing.T) {
 		t.Errorf("body on hop 2 = %v", got)
 	}
 }
+
+// DeleteSlotRunners reads every page of runners, and one failed DELETE
+// doesn't stop the others.
+func TestDeleteSlotRunnersPagesAndErrors(t *testing.T) {
+	var pages []string
+	var deleted []int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/orgs/acme/actions/runners":
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pages = append(pages, r.URL.Query().Get("page"))
+			var rs []map[string]any
+			n := 100
+			if page == 2 {
+				n = 30
+			}
+			for i := 0; i < n; i++ {
+				id := (page-1)*100 + i + 1
+				name := "other-" + strconv.Itoa(id)
+				if id == 5 || id == 150 || id == 120 {
+					name = "ghr-3f9a-0123abcd-" + strconv.Itoa(id)
+				}
+				rs = append(rs, map[string]any{"id": id, "name": name})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"runners": rs})
+		case r.Method == "DELETE":
+			id, _ := strconv.ParseInt(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:], 10, 64)
+			if id == 5 {
+				w.WriteHeader(500)
+				return
+			}
+			deleted = append(deleted, id)
+			w.WriteHeader(204)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := NewWithTransport(&config.Config{URL: srv.URL + "/acme", Auth: config.Auth{Type: "pat", PAT: "tok"}}, srv.Client().Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := c.DeleteSlotRunners(context.Background(), "ghr-3f9a-0123abcd")
+	if !IsStatus(err, 500) || n != 1 {
+		t.Errorf("n=%d err=%v, want 1 and the 500", n, err)
+	}
+	if strings.Join(pages, ",") != "1,2" {
+		t.Errorf("pages read: %v", pages)
+	}
+	if len(deleted) != 1 || deleted[0] != 120 {
+		t.Errorf("deleted %v, want [120]", deleted)
+	}
+}

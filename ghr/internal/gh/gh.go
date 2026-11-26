@@ -37,12 +37,16 @@ type Client struct {
 	tokenExp time.Time
 }
 
-func New(cfg *config.Config) (*Client, error) {
+func New(cfg *config.Config) (*Client, error) { return NewWithTransport(cfg, nil) }
+
+// NewWithTransport is New with a custom transport (nil for the default),
+// so tests in other packages can point the client at an httptest server.
+func NewWithTransport(cfg *config.Config, rt http.RoundTripper) (*Client, error) {
 	t, err := cfg.Target()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{cfg: cfg, target: t, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: sameOriginRedirect}}, nil
+	return &Client{cfg: cfg, target: t, http: &http.Client{Transport: rt, Timeout: 30 * time.Second, CheckRedirect: sameOriginRedirect}}, nil
 }
 
 // sameOriginRedirect stops the credential from following a redirect to
