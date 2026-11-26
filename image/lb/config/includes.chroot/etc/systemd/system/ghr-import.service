@@ -1,0 +1,14 @@
+[Unit]
+Description=Import settings from the ghr folder on the GHR-BOOT drive
+Requires=ghr-data.service
+After=ghr-data.service
+Before=ghr-web.service ghr-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A bad runner.env must not stop the web page from starting.
+ExecStart=-/usr/local/bin/ghr import
+
+[Install]
+WantedBy=multi-user.target

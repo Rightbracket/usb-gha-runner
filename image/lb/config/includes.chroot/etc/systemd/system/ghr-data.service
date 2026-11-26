@@ -1,0 +1,16 @@
+[Unit]
+Description=Set up the GHR-DATA partition on the boot stick
+DefaultDependencies=no
+After=systemd-udev-trigger.service systemd-udevd.service systemd-remount-fs.service
+Wants=systemd-udev-trigger.service
+Before=local-fs.target systemd-journal-flush.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service ghr-import.service ghr-agent.service ghr-web.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/ghr/data-setup
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=local-fs.target

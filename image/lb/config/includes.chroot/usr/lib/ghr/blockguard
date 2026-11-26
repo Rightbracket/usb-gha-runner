@@ -1,0 +1,15 @@
+#!/bin/sh
+# Called by udev with a kernel device name (sda, sda1, nvme0n1p2, ...).
+# Everything that isn't on the boot stick becomes read-only. If the boot stick
+# isn't known yet the device is made read-only too: failing safe.
+dev="$1"
+[ -n "$dev" ] || exit 0
+boot=$(cat /run/ghr/boot-disk 2>/dev/null || true)
+disk="$dev"
+if [ -e "/sys/class/block/$dev/partition" ]; then
+  disk=$(basename "$(dirname "$(readlink -f "/sys/class/block/$dev")")")
+fi
+if [ -n "$boot" ] && [ "$disk" = "$boot" ]; then
+  exit 0
+fi
+exec /usr/sbin/blockdev --setro "/dev/$dev"

@@ -1,0 +1,1 @@
+# Overrides the stock rule: never scan or register btrfs devices on host disks.

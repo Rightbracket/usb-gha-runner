@@ -1,0 +1,68 @@
+#!/bin/sh
+# Final setup of the runner's root filesystem, run inside the chroot.
+set -eu
+
+# --- Sysbox (not packaged in Debian). build.sh downloads and verifies the
+# .deb; its postinst can't run in a chroot, so unpack it and do its setup here.
+# Unpack into a scratch dir first: extracting straight onto / would replace the
+# merged-/usr symlinks (/lib -> usr/lib) with real directories.
+if [ -f /var/cache/ghr/sysbox.deb ]; then
+  x=$(mktemp -d)
+  dpkg-deb -x /var/cache/ghr/sysbox.deb "$x"
+  tar -C "$x" -cf - . | tar -C / --keep-directory-symlink -xf -
+  rm -rf "$x" /var/cache/ghr
+fi
+command -v sysbox-runc >/dev/null || { echo "sysbox-runc missing" >&2; exit 1; }
+id sysbox >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sysbox
+grep -q '^sysbox:' /etc/subuid 2>/dev/null || echo 'sysbox:165536:268435456' >>/etc/subuid
+grep -q '^sysbox:' /etc/subgid 2>/dev/null || echo 'sysbox:165536:268435456' >>/etc/subgid
+
+# --- Users. Nobody can log in on the console: root and ghr have no password.
+# ghr is the SSH admin account (key-only, and SSH is off by default).
+passwd -l root
+getent group ghr-web >/dev/null || groupadd --system ghr-web
+id ghr-web >/dev/null 2>&1 || useradd --system --gid ghr-web --groups systemd-journal --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ghr-web
+id ghr >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo,docker,systemd-journal ghr
+passwd -l ghr
+echo 'ghr ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/ghr
+chmod 0440 /etc/sudoers.d/ghr
+
+# --- Never activate, scan, mount, swap to or maintain host disks.
+for p in lvm2 mdadm multipath-tools zfsutils-linux bcache-tools cryptsetup udisks2 os-prober smartmontools btrfs-progs; do
+  if dpkg -s "$p" >/dev/null 2>&1; then apt-get purge -y "$p"; fi
+done
+: >/etc/fstab
+for u in swap.target fstrim.timer fstrim.service e2scrub_all.timer e2scrub_all.service e2scrub_reap.service \
+         apt-daily.timer apt-daily-upgrade.timer man-db.timer systemd-hibernate.service systemd-hybrid-sleep.service \
+         systemd-suspend-then-hibernate.service systemd-hibernate-resume.service; do
+  systemctl mask "$u"
+done
+
+# --- SSH is off until turned on from the web page; host keys are made per stick.
+systemctl disable ssh.service ssh.socket 2>/dev/null || true
+rm -f /etc/ssh/ssh_host_*
+
+# --- Services.
+systemctl enable systemd-networkd.service systemd-resolved.service systemd-timesyncd.service \
+  nftables.service avahi-daemon.service docker.service containerd.service \
+  ghr-data.service ghr-hostname.service ghr-import.service ghr-binfmt.service \
+  ghr-agent.service ghr-web.service ghr-issue.service ghr-prune.timer
+# Enable whichever Sysbox units the release ships (names changed over time).
+for u in sysbox.service sysbox-mgr.service sysbox-fs.service; do
+  if [ -e "/usr/lib/systemd/system/$u" ]; then systemctl enable "$u"; fi
+done
+if ! systemctl is-enabled sysbox-mgr.service >/dev/null 2>&1 && ! systemctl is-enabled sysbox.service >/dev/null 2>&1; then
+  echo "no Sysbox systemd units found; the .deb shipped:" >&2
+  find / -xdev -name 'sysbox*.service' >&2
+  exit 1
+fi
+systemctl set-default multi-user.target
+
+# --- Rebuild the initramfs so it includes the read-only rule.
+update-initramfs -u -k all
+lsinitramfs /boot/initrd.img-* | grep -q 10-ghr-readonly.rules || { echo "read-only rule missing from initramfs" >&2; exit 1; }
+lsinitramfs /boot/initrd.img-* | grep -q 'live/boot/9995-ghr-strict-media.sh' || { echo "strict live-media override missing from initramfs" >&2; exit 1; }
+
+# --- Trim.
+apt-get clean
+rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /var/cache/debconf/*-old

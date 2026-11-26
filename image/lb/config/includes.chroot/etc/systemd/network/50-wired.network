@@ -1,0 +1,15 @@
+# DHCP (IPv4 and IPv6) on every physical Ethernet port.
+[Match]
+Type=ether
+Kind=!*
+Name=!veth* docker* br-*
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+LLMNR=no
+MulticastDNS=no
+
+[DHCPv4]
+SendHostname=yes
+UseDomains=yes

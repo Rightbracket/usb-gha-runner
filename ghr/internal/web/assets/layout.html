@@ -1,0 +1,76 @@
+{{define "top"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · {{.Hostname}}</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="dot"></span>{{.Hostname}}<span class="muted"> · USB GHA runner {{.Version}}</span></div>
+  {{if ne .Title "Log in"}}{{if ne .Title "Set admin password"}}
+  <nav>
+    <a href="/">Status</a>
+    <a href="/config">Configure</a>
+    <a href="/logs">Logs</a>
+    <form method="post" action="/logout" class="inline"><button class="link">Log out</button></form>
+  </nav>
+  {{end}}{{end}}
+</header>
+<main>
+{{if .Msg}}<p class="flash ok">{{.Msg}}</p>{{end}}
+{{if .Err}}<p class="flash err">{{.Err}}</p>{{end}}
+{{end}}
+
+{{define "bottom"}}
+</main>
+</body>
+</html>{{end}}
+
+{{define "setup"}}{{template "top" .}}
+<section class="card narrow">
+  <h1>Welcome</h1>
+  <p>This machine has no admin password yet. Whoever sets it now controls the runner, so do it before plugging into a shared network for long.</p>
+  {{if .Fingerprint}}<p class="muted small">Certificate fingerprint (SHA-256), also shown on the machine's screen:<br><code class="wrap">{{.Fingerprint}}</code></p>{{end}}
+  <form method="post" action="/setup">
+    <label>New password<input type="password" name="password" minlength="10" required autocomplete="new-password" autofocus></label>
+    <label>Repeat it<input type="password" name="confirm" minlength="10" required autocomplete="new-password"></label>
+    <button class="primary">Set password</button>
+  </form>
+  <p class="muted small">At least 10 characters. To skip this page on future sticks, put the password in <code>ghr/admin-password</code> on the GHR-BOOT drive before first boot.</p>
+</section>
+{{template "bottom" .}}{{end}}
+
+{{define "login"}}{{template "top" .}}
+<section class="card narrow">
+  <h1>Log in</h1>
+  <form method="post" action="/login">
+    <label>Admin password<input type="password" name="password" required autocomplete="current-password" autofocus></label>
+    <button class="primary">Log in</button>
+  </form>
+</section>
+{{template "bottom" .}}{{end}}
+
+{{define "power"}}{{template "top" .}}
+<section class="card narrow">
+  {{if eq .Data.Action "reboot"}}<h1>Rebooting</h1><p>The page will be back in a minute or two. <a href="/">Reload</a></p>
+  {{else}}<h1>Shutting down</h1><p>It's safe to unplug the stick once the machine is off.</p>{{end}}
+</section>
+{{template "bottom" .}}{{end}}
+
+{{define "logs"}}{{template "top" .}}
+<section class="card">
+  <div class="row between">
+    <h1>Logs</h1>
+    <div class="tabs" id="log-tabs">
+      <button data-unit="runner" class="on">Runner</button>
+      <button data-unit="docker">Docker</button>
+      <button data-unit="web">Web</button>
+      <button data-unit="system">Everything</button>
+    </div>
+  </div>
+  <pre id="log" class="log"></pre>
+</section>
+{{template "bottom" .}}{{end}}

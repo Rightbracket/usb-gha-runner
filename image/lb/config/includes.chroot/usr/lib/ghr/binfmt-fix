@@ -1,0 +1,19 @@
+#!/bin/bash
+# Make sure every QEMU binfmt handler has the F (fix-binary) flag, so the
+# kernel opens the interpreter once at registration and emulation works
+# inside containers that don't contain QEMU.
+shopt -s nullglob
+cd /proc/sys/fs/binfmt_misc 2>/dev/null || exit 0
+hexesc() { printf '%s' "$1" | sed 's/../\\x&/g'; }
+for e in qemu-*; do
+  flags=$(sed -n 's/^flags: //p' "$e")
+  [[ $flags == *F* ]] && continue
+  interp=$(sed -n 's/^interpreter //p' "$e")
+  offset=$(sed -n 's/^offset //p' "$e")
+  magic=$(sed -n 's/^magic //p' "$e")
+  mask=$(sed -n 's/^mask //p' "$e")
+  [ -n "$magic" ] && [ -x "$interp" ] || continue
+  echo -1 >"$e"
+  printf ':%s:M:%s:%s:%s:%s:%s\n' "$e" "${offset:-0}" "$(hexesc "$magic")" "$(hexesc "$mask")" "$interp" "${flags}F" >register
+  echo "re-registered $e with the F flag"
+done

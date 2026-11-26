@@ -1,0 +1,10 @@
+[Unit]
+Description=Prune builder caches when /data is over 80% full
+Requires=ghr-data.service docker.service
+After=ghr-data.service docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/bin/ghr prune --if-over 80

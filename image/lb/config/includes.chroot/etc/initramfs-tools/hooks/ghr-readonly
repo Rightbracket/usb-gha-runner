@@ -1,0 +1,12 @@
+#!/bin/sh
+# Copy the read-only udev rule and blockdev into the initramfs.
+PREREQ="udev"
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+copy_exec /usr/sbin/blockdev /usr/sbin/blockdev
+mkdir -p "${DESTDIR}/usr/lib/udev/rules.d"
+cp /etc/initramfs-tools/ghr/10-ghr-readonly.rules "${DESTDIR}/usr/lib/udev/rules.d/"
+if [ -d "${DESTDIR}/lib/udev/rules.d" ] && [ ! -L "${DESTDIR}/lib" ]; then
+  cp /etc/initramfs-tools/ghr/10-ghr-readonly.rules "${DESTDIR}/lib/udev/rules.d/"
+fi

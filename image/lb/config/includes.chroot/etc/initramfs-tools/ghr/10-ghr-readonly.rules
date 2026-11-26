@@ -1,0 +1,4 @@
+# In the initramfs every disk is made read-only the moment it appears, the
+# boot stick included: live-boot only needs to read it. Once the real system
+# is up, ghr-data.service makes the boot stick (and only it) writable again.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL!="loop*|ram*|zram*|nbd*|sr*|fd*", RUN+="/usr/sbin/blockdev --setro $devnode"
