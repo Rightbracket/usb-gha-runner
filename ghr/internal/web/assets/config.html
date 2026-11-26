@@ -12,7 +12,7 @@
         <input name="runner_group" value="{{$c.RunnerGroup}}" placeholder="Default">
       </label>
       <label>Name prefix <span class="muted">(runners are named PREFIX-{{.Hostname}}-&lt;stick ID&gt;-1, -2, …)</span>
-        <input name="name_prefix" value="{{$c.NamePrefix}}" placeholder="{{.Hostname}}">
+        <input name="name_prefix" value="{{$c.NamePrefix}}" maxlength="40" pattern="[A-Za-z0-9_\-]*" placeholder="{{.Hostname}}">
       </label>
     </div>
     <label>Extra labels <span class="muted">(comma separated; always added: {{.Data.Always}})</span>

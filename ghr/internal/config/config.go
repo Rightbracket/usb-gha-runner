@@ -28,7 +28,7 @@ const (
 	BootDiskRun = "/run/ghr/boot-disk"
 	// MaxPrefix keeps PREFIX-ghr-XXXX-<stick ID>-NN within GitHub's and
 	// Linux's 64-character limits.
-	MaxPrefix = 40
+	MaxPrefix   = 40
 	StickIDPath = "/data/etc/ghr/stick-id"
 	MaxWorkers  = 32
 )

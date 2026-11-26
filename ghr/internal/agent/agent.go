@@ -105,6 +105,9 @@ func Run(ctx context.Context) error {
 		Ready: func() bool { _, err := os.Stat(importer.PasswordFile); return err == nil },
 	}
 	a.sv = sv
+	// If serve fails, stop the supervisor too instead of leaving it running.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	svDone := make(chan struct{})
 	go func() {
 		defer close(svDone)
@@ -114,6 +117,7 @@ func Run(ctx context.Context) error {
 	}()
 
 	err = a.serve(ctx)
+	cancel()
 	// Job containers belong to dockerd, not to this unit, so wait for the
 	// supervisor to stop them before exiting (stopping nftables also stops
 	// the agent, and no job may outlive the firewall). Stay under the unit's

@@ -409,9 +409,10 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		}
 	}()
 
-	// docker stop fails while the container is still being created, so a
-	// stop that didn't take is retried until the container exits.
-	stop := func() bool { return exec.Command("docker", "stop", "-t", "30", container).Run() == nil }
+	// docker stop can miss a container that is still being created (it
+	// fails, or succeeds on one not yet started), so keep stopping every
+	// second until the container has exited.
+	stop := func() { _ = exec.Command("docker", "stop", "-t", "30", container).Run() }
 	drainCh := s.drain
 	ctxDone := ctx.Done()
 	var retry <-chan time.Time
@@ -426,9 +427,8 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 			s.write(SlotState{RunnerName: name, State: "draining", Job: job})
 			return // let the job finish
 		}
-		if !stop() {
-			retry = time.After(time.Second)
-		}
+		stop()
+		retry = time.After(time.Second)
 	}
 	for {
 		select {
