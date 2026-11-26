@@ -252,6 +252,9 @@ func TestDeleteSlotRunnersPagesAndErrors(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/v3/orgs/acme/actions/runners":
+			if r.URL.Query().Get("per_page") != "100" {
+				t.Errorf("per_page=%q, want 100", r.URL.Query().Get("per_page"))
+			}
 			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 			pages = append(pages, r.URL.Query().Get("page"))
 			var rs []map[string]any
@@ -262,7 +265,7 @@ func TestDeleteSlotRunnersPagesAndErrors(t *testing.T) {
 			for i := 0; i < n; i++ {
 				id := (page-1)*100 + i + 1
 				name := "other-" + strconv.Itoa(id)
-				if id == 5 || id == 150 || id == 120 {
+				if id == 5 || id == 120 || id == 130 {
 					name = "ghr-3f9a-0123abcd-" + strconv.Itoa(id)
 				}
 				rs = append(rs, map[string]any{"id": id, "name": name})
@@ -286,13 +289,13 @@ func TestDeleteSlotRunnersPagesAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, err := c.DeleteSlotRunners(context.Background(), "ghr-3f9a-0123abcd")
-	if !IsStatus(err, 500) || n != 1 {
-		t.Errorf("n=%d err=%v, want 1 and the 500", n, err)
+	if !IsStatus(err, 500) || n != 2 {
+		t.Errorf("n=%d err=%v, want 2 and the 500", n, err)
 	}
 	if strings.Join(pages, ",") != "1,2" {
 		t.Errorf("pages read: %v", pages)
 	}
-	if len(deleted) != 1 || deleted[0] != 120 {
-		t.Errorf("deleted %v, want [120]", deleted)
+	if len(deleted) != 2 || deleted[0] != 120 || deleted[1] != 130 {
+		t.Errorf("deleted %v, want [120 130]", deleted)
 	}
 }

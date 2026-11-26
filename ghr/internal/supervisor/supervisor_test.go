@@ -16,6 +16,27 @@ import (
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/gh"
 )
 
+// eventLog records DELETEs and docker stops in the order they happen.
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(e string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.events = append(l.events, e)
+	l.mu.Unlock()
+}
+
+func (l *eventLog) list() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
 // fakeAPI stands in for GitHub. del, when set, answers the n-th DELETE
 // (counting from 1); otherwise DELETE succeeds.
 type fakeAPI struct {
@@ -24,6 +45,8 @@ type fakeAPI struct {
 	deletes int
 	jits    [][]string
 	nextID  int64
+	names   map[int64]string
+	log     *eventLog
 }
 
 func (f *fakeAPI) JITConfig(_ context.Context, name string, labels []string) (string, gh.Runner, error) {
@@ -31,13 +54,18 @@ func (f *fakeAPI) JITConfig(_ context.Context, name string, labels []string) (st
 	defer f.mu.Unlock()
 	f.jits = append(f.jits, labels)
 	f.nextID++
+	if f.names == nil {
+		f.names = map[int64]string{}
+	}
+	f.names[f.nextID] = name
 	return "ENC", gh.Runner{ID: f.nextID, Name: name}, nil
 }
 
 func (f *fakeAPI) FindRunner(context.Context, string) (*gh.Runner, error) { return nil, nil }
 
-func (f *fakeAPI) DeleteRunner(context.Context, int64) error {
+func (f *fakeAPI) DeleteRunner(_ context.Context, id int64) error {
 	f.mu.Lock()
+	f.log.add(fmt.Sprintf("delete %s #%d", f.names[id], id))
 	f.deletes++
 	n, del := f.deletes, f.del
 	f.mu.Unlock()
@@ -94,6 +122,7 @@ type fakeDocker struct {
 	stops      int
 	stopsBy    map[string]int
 	exitOnStop int
+	log        *eventLog
 }
 
 func newFakeDocker() *fakeDocker {
@@ -129,6 +158,7 @@ func (d *fakeDocker) run(args ...string) error {
 	case "stop":
 		d.stops++
 		d.stopsBy[name]++
+		d.log.add("stop " + name)
 		n := d.exitOnStop
 		if n == 0 {
 			n = 1
@@ -299,18 +329,18 @@ func TestDrainGivesUpOn401After60s(t *testing.T) {
 	h := newHarness(t, func(int) error { return status(401) })
 	h.start()
 	h.s.startDrain()
-	for {
+	for i := 0; i < 6; i++ { // DELETEs at +0..+50 s
 		tm := h.nextTimer()
-		if tm.d == time.Second { // the stop's retry
-			break
-		}
 		if tm.d != 10*time.Second {
-			t.Fatalf("retry after %s, want 10s", tm.d)
+			t.Fatalf("retry %d after %s at +%s, want 10s", i, tm.d, h.elapsed())
 		}
 		if h.stops() != 0 {
 			t.Fatalf("stopped at +%s, before the 60 s deadline", h.elapsed())
 		}
 		h.fire(tm)
+	}
+	if tm := h.nextTimer(); tm.d != time.Second { // the stop's retry
+		t.Fatalf("at +%s: retry after %s, want the 1s stop retry", h.elapsed(), tm.d)
 	}
 	if e := h.elapsed(); e != 60*time.Second {
 		t.Errorf("stopped at +%s, want +60s", e)
@@ -409,6 +439,18 @@ func TestDrainBusyRunnerFinishesJob(t *testing.T) {
 	h.start()
 	h.c.say("2026-11-26 18:01:00Z: Running job: build")
 	h.s.startDrain()
+	// Only act()'s busy branch writes "draining" with the job name.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(filepath.Join(h.s.parent.SlotsDir, "1.json"))
+		if strings.Contains(string(b), `"state":"draining"`) && strings.Contains(string(b), `"job":"build"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("drain never reached the busy runner: %s", b)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	h.c.say("still building")
 	h.c.say("2026-11-26 18:02:00Z: Job build completed with result: Failed")
 	h.c.exit(nil)
@@ -527,6 +569,8 @@ func TestRunWaitsForReady(t *testing.T) {
 
 func TestRunRefillsAfterLabelChange(t *testing.T) {
 	h := newRunHarness(t, true)
+	log := &eventLog{}
+	h.api.log, h.docker.log = log, log
 	h.save(workers(2, "old"))
 	h.run()
 	h.waitFor("2 slots", func() bool { return h.live() == 2 })
@@ -548,9 +592,38 @@ func TestRunRefillsAfterLabelChange(t *testing.T) {
 			t.Errorf("JIT %d labels %v, want ...%s", i, l, want)
 		}
 	}
-	// Each old runner was deregistered before it was stopped.
-	if d := h.api.deleteCount(); d < 2 {
-		t.Errorf("%d DELETEs for 2 drained runners", d)
+	// Each old runner was deregistered before its container was stopped.
+	events := log.list()
+	for n := 1; n <= 2; n++ {
+		stop := fmt.Sprintf("stop ghr-slot-%d", n)
+		del := fmt.Sprintf("delete ghr-test-0123abcd-%d #", n)
+		seenDelete := false
+		for _, e := range events {
+			if strings.HasPrefix(e, del) {
+				seenDelete = true
+			}
+			if e == stop {
+				if !seenDelete {
+					t.Errorf("slot %d stopped before its runner was deleted: %v", n, events)
+				}
+				break
+			}
+		}
+	}
+}
+
+// StopAll drains the slots itself, without waiting for Run's next poll.
+func TestStopAllDrains(t *testing.T) {
+	h := newRunHarness(t, true)
+	h.sv.poll = time.Hour // Run's first pass starts the slots; no later poll comes
+	h.save(workers(2))
+	h.run()
+	h.waitFor("2 slots", func() bool { return h.live() == 2 })
+	if err := h.sv.StopAll(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if n, l := h.sv.count(), h.live(); n != 0 || l != 0 {
+		t.Fatalf("after StopAll: %d slots, %d live containers", n, l)
 	}
 }
 

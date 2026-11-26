@@ -189,7 +189,7 @@ func (a *Agent) Handler() http.Handler {
 		writeJSON(w, a.collector.Collect())
 	})
 	mux.HandleFunc("GET /v1/config", func(w http.ResponseWriter, r *http.Request) {
-		cfg, err := config.Load(config.ConfigPath)
+		cfg, err := config.Load(a.cfgPath())
 		if err != nil {
 			httpErr(w, err, 500)
 			return
@@ -209,7 +209,7 @@ func (a *Agent) Handler() http.Handler {
 		writeJSON(w, res)
 	})
 	mux.HandleFunc("GET /v1/runner.env", func(w http.ResponseWriter, r *http.Request) {
-		cfg, err := config.Load(config.ConfigPath)
+		cfg, err := config.Load(a.cfgPath())
 		if err != nil {
 			httpErr(w, err, 500)
 			return
@@ -326,13 +326,13 @@ func (a *Agent) putSSH(w http.ResponseWriter, r *http.Request) {
 	}
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
-	cfg, err := config.Load(config.ConfigPath)
+	cfg, err := config.Load(a.cfgPath())
 	if err != nil {
 		httpErr(w, err, 500)
 		return
 	}
 	cfg.SSH = in
-	if err := config.Save(config.ConfigPath, cfg); err != nil {
+	if err := config.Save(a.cfgPath(), cfg); err != nil {
 		httpErr(w, err, 500)
 		return
 	}
