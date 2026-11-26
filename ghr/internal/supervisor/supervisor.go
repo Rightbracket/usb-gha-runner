@@ -385,13 +385,8 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		defer close(readDone)
 		readLines(pr, 1024*1024, func(line string) {
 			fmt.Printf("[slot %d] %s\n", s.n, line) // to the journal
+			// Job markers first: job names are chosen by workflow authors.
 			switch {
-			case reListening.MatchString(line):
-				st := "idle"
-				if s.draining() {
-					st = "draining"
-				}
-				s.write(SlotState{RunnerName: name, State: st})
 			case reRunning.MatchString(line):
 				mu.Lock()
 				busy, ranJob, job, started = true, true, strings.TrimSpace(reRunning.FindStringSubmatch(line)[1]), time.Now()
@@ -404,6 +399,13 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 				sec := int(time.Since(started).Seconds())
 				mu.Unlock()
 				s.parent.appendHistory(HistoryEntry{Time: time.Now(), Slot: s.n, RunnerName: name, Job: strings.TrimSpace(m[1]), Result: m[2], Seconds: sec})
+			// Last, so a job whose name contains the phrase still counts.
+			case reListening.MatchString(line):
+				st := "idle"
+				if s.draining() {
+					st = "draining"
+				}
+				s.write(SlotState{RunnerName: name, State: st})
 			}
 		})
 	}()
@@ -416,6 +418,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 	ctxDone := ctx.Done()
 	var retry <-chan time.Time
 	stopping := false // shutting down: stop even a busy runner
+	deregistered := false
 	draining := false
 	act := func() {
 		retry = nil
@@ -425,6 +428,20 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		if b && !stopping {
 			s.write(SlotState{RunnerName: name, State: "draining", Job: job})
 			return // let the job finish
+		}
+		if !stopping && !deregistered {
+			// GitHub may have handed the runner a job it hasn't printed yet.
+			// Deleting the runner is refused while it has one, so only an
+			// idle runner gets stopped; a busy one is left to finish.
+			dctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err := client.DeleteRunner(dctx, runnerID)
+			cancel()
+			if err != nil && !gh.IsStatus(err, 404) {
+				s.write(SlotState{RunnerName: name, State: "draining", Job: job})
+				retry = time.After(5 * time.Second)
+				return
+			}
+			deregistered = true
 		}
 		stop()
 		retry = time.After(time.Second)
@@ -486,18 +503,30 @@ func trimHistory(path string, keep int) {
 // with the next line and never stops before EOF.
 func readLines(r io.Reader, max int, fn func(string)) {
 	br := bufio.NewReaderSize(r, max)
+	var pending []byte // a full buffer not yet known to be cut
 	skipping := false
 	for {
 		b, err := br.ReadSlice('\n')
 		switch {
+		case pending != nil:
+			// The line ended exactly at the buffer's end if only the
+			// newline (or EOF) follows.
+			if err != bufio.ErrBufferFull && strings.TrimRight(string(b), "\r\n") == "" {
+				fn(strings.TrimRight(string(pending), "\r\n"))
+			} else {
+				fn(strings.TrimRight(string(pending), "\r") + " [line too long, cut]")
+			}
+			pending = nil
 		case err == bufio.ErrBufferFull:
 			if !skipping {
-				fn(string(b) + " [line too long, cut]")
+				pending = append([]byte(nil), b...)
 			}
+		case !skipping && len(b) > 0:
+			fn(strings.TrimRight(string(b), "\r\n"))
+		}
+		if err == bufio.ErrBufferFull {
 			skipping = true
 			continue
-		case len(b) > 0 && !skipping:
-			fn(strings.TrimRight(string(b), "\r\n"))
 		}
 		skipping = false
 		if err != nil {
