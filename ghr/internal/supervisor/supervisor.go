@@ -373,6 +373,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait(); pw.Close() }()
 
+	readDone := make(chan struct{})
 	var (
 		mu      sync.Mutex
 		busy    bool
@@ -381,10 +382,8 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		started time.Time
 	)
 	go func() {
-		sc := bufio.NewScanner(pr)
-		sc.Buffer(make([]byte, 64*1024), 1024*1024)
-		for sc.Scan() {
-			line := sc.Text()
+		defer close(readDone)
+		readLines(pr, 1024*1024, func(line string) {
 			fmt.Printf("[slot %d] %s\n", s.n, line) // to the journal
 			switch {
 			case reListening.MatchString(line):
@@ -406,12 +405,7 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 				mu.Unlock()
 				s.parent.appendHistory(HistoryEntry{Time: time.Now(), Slot: s.n, RunnerName: name, Job: strings.TrimSpace(m[1]), Result: m[2], Seconds: sec})
 			}
-		}
-		if err := sc.Err(); err != nil {
-			log.Printf("slot %d: output: %v", s.n, err)
-		}
-		// Keep reading so cmd.Wait can return even after an over-long line.
-		_, _ = io.Copy(io.Discard, pr)
+		})
 	}()
 
 	// docker stop can miss a container that is still being created (it
@@ -438,6 +432,9 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 	for {
 		select {
 		case err := <-waitErr:
+			// The output may still hold the last lines (Running job:, Job
+			// ... completed); handle them before deciding what happened.
+			<-readDone
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil && !ranJob {
@@ -482,4 +479,29 @@ func trimHistory(path string, keep int) {
 		return
 	}
 	_ = config.WriteFileAtomic(path, []byte(strings.Join(lines[len(lines)-keep:], "\n")+"\n"), 0o644)
+}
+
+// readLines calls fn for each line of r. A line longer than max is cut to
+// its first max bytes and the rest of it skipped, so reading carries on
+// with the next line and never stops before EOF.
+func readLines(r io.Reader, max int, fn func(string)) {
+	br := bufio.NewReaderSize(r, max)
+	skipping := false
+	for {
+		b, err := br.ReadSlice('\n')
+		switch {
+		case err == bufio.ErrBufferFull:
+			if !skipping {
+				fn(string(b) + " [line too long, cut]")
+			}
+			skipping = true
+			continue
+		case len(b) > 0 && !skipping:
+			fn(strings.TrimRight(string(b), "\r\n"))
+		}
+		skipping = false
+		if err != nil {
+			return
+		}
+	}
 }
