@@ -4,9 +4,13 @@ set -eu
 
 # --- Sysbox (not packaged in Debian). build.sh downloads and verifies the
 # .deb; its postinst can't run in a chroot, so unpack it and do its setup here.
+# Unpack into a scratch dir first: extracting straight onto / would replace the
+# merged-/usr symlinks (/lib -> usr/lib) with real directories.
 if [ -f /var/cache/ghr/sysbox.deb ]; then
-  dpkg-deb -x /var/cache/ghr/sysbox.deb /
-  rm -rf /var/cache/ghr
+  x=$(mktemp -d)
+  dpkg-deb -x /var/cache/ghr/sysbox.deb "$x"
+  tar -C "$x" -cf - . | tar -C / --keep-directory-symlink -xf -
+  rm -rf "$x" /var/cache/ghr
 fi
 command -v sysbox-runc >/dev/null || { echo "sysbox-runc missing" >&2; exit 1; }
 id sysbox >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sysbox
@@ -41,9 +45,17 @@ rm -f /etc/ssh/ssh_host_*
 # --- Services.
 systemctl enable systemd-networkd.service systemd-resolved.service systemd-timesyncd.service \
   nftables.service avahi-daemon.service docker.service containerd.service \
-  sysbox.service sysbox-mgr.service sysbox-fs.service \
   ghr-data.service ghr-hostname.service ghr-import.service ghr-binfmt.service \
   ghr-agent.service ghr-web.service ghr-issue.service ghr-prune.timer
+# Enable whichever Sysbox units the release ships (names changed over time).
+for u in sysbox.service sysbox-mgr.service sysbox-fs.service; do
+  if [ -e "/usr/lib/systemd/system/$u" ]; then systemctl enable "$u"; fi
+done
+if ! systemctl is-enabled sysbox-mgr.service >/dev/null 2>&1 && ! systemctl is-enabled sysbox.service >/dev/null 2>&1; then
+  echo "no Sysbox systemd units found; the .deb shipped:" >&2
+  find / -xdev -name 'sysbox*.service' >&2
+  exit 1
+fi
 systemctl set-default multi-user.target
 
 # --- Rebuild the initramfs so it includes the read-only rule.
