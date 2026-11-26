@@ -37,8 +37,9 @@ accel=tcg cpu=max
 if [ -w /dev/kvm ]; then accel=kvm cpu=host; fi
 fw=()
 if [ "$mode" = uefi ]; then
-  code=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -n1)
-  vars=$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null | head -n1)
+  first() { for f in "$@"; do [ -e "$f" ] && { echo "$f"; return 0; }; done; return 1; }
+  code=$(first /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd) || { echo "OVMF not installed"; exit 1; }
+  vars=$(first /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd)
   cp "$vars" vars.fd
   fw=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=vars.fd")
 fi
@@ -73,13 +74,37 @@ wait_down() {
   return 1
 }
 status() { c -f "$BASE/api/status"; }
+# After the VM has stopped, print the stick's journal from GHR-DATA (mounted
+# read-only) so a failed boot can be diagnosed from the CI log.
+dump_journal() {
+  local n=$1 start mnt
+  sgdisk -p stick.img | tail -n +8 || true
+  start=$(sgdisk -p stick.img | awk '$NF == "GHR-DATA" {print $2}')
+  if [ -z "$start" ]; then echo "  (no GHR-DATA partition, so no journal)"; return 0; fi
+  mnt=$(mktemp -d)
+  if sudo mount -o ro,noload,loop,offset=$((start * 512)) stick.img "$mnt"; then
+    # shellcheck disable=SC2024 # the file is meant to be ours, not root's
+    sudo journalctl -D "$mnt/log/journal" --no-pager -o short-monotonic >"journal-$mode-$n.txt" 2>&1 || true
+    echo "  --- failed units and ghr services (full journal in journal-$mode-$n.txt) ---"
+    grep -E 'Failed|failed|ghr|sysbox|docker|error' "journal-$mode-$n.txt" | grep -v 'systemd-ssh-generator' | tail -n 150 || true
+    sudo umount "$mnt"
+  else
+    echo "  (could not mount GHR-DATA)"
+  fi
+  rmdir "$mnt"
+}
+stop_vm() {
+  kill "$(cat qemu.pid)" 2>/dev/null || true
+  wait_down || true
+}
 
 log "boot 1 ($mode, $accel)"
 boot 1
 if ! wait_up 180; then
   bad "web page never came up"
   tail -n 80 "serial-$mode-1.log" || true
-  kill "$(cat qemu.pid)" 2>/dev/null || true
+  stop_vm
+  dump_journal 1
   exit 1
 fi
 ok "web page is up"
@@ -123,7 +148,13 @@ fi
 log "reboot"
 c -o /dev/null -X POST "$BASE/actions/reboot"
 sleep 20
-if ! wait_up 180; then bad "did not come back after reboot"; else
+if ! wait_up 180; then
+  bad "did not come back after reboot"
+  tail -n 80 "serial-$mode-2.log" || true
+  stop_vm
+  dump_journal 2
+  exit 1
+else
   ok "back after reboot"
   [ "$(c "$BASE/api/health" | jq -r .password_set)" = true ] && ok "password survived" || bad "password lost"
   rm -f "$jar"

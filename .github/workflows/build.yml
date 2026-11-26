@@ -114,5 +114,6 @@ jobs:
           name: qemu-${{ matrix.firmware }}-logs
           path: |
             ${{ runner.temp }}/qemu/serial-*.log
+            ${{ runner.temp }}/qemu/journal-*.txt
             ${{ runner.temp }}/qemu/status-*.json
           retention-days: 7
