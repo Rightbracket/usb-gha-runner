@@ -31,6 +31,8 @@ losetup -d "$loop"
 truncate -s 1G swap-gpt.img
 sgdisk -q -o -n 1:0:+256M -t 1:8200 -n 2:0:0 -t 2:8300 swap-gpt.img
 loop=$(losetup -f --show -P swap-gpt.img)
+udevadm settle || true
+for _ in $(seq 20); do [ -b "${loop}p2" ] && break; partx -u "$loop" 2>/dev/null || true; sleep 0.5; done
 mkswap -q "${loop}p1"
 mkfs.ext4 -q -F "${loop}p2"
 losetup -d "$loop"
