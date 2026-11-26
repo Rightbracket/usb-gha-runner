@@ -48,7 +48,7 @@ type Config struct {
 	RunnerGroup  string   `json:"runner_group,omitempty"` // org scope only; default group when empty
 	NamePrefix   string   `json:"name_prefix,omitempty"`
 	Labels       []string `json:"labels,omitempty"`
-	Workers      string   `json:"workers"` // "auto" or "1".."32"
+	Workers      string   `json:"workers"`                  // "auto" or "1".."32"
 	SlotCPUs     float64  `json:"slot_cpus,omitempty"`      // 0 = even split
 	SlotMemoryMB int      `json:"slot_memory_mb,omitempty"` // 0 = even split
 	Auth         Auth     `json:"auth"`

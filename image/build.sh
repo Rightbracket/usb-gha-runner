@@ -17,7 +17,7 @@ gh_api() {
 }
 
 log "ghr binary"
-(cd "$root/ghr" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o "$out/ghr" ./cmd/ghr)
+(cd "$root/ghr" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X github.com/Rightbracket/usb-gha-runner/ghr/internal/agent.MirrorImage=$REGISTRY_IMAGE" -o "$out/ghr" ./cmd/ghr)
 
 log "resolve versions"
 if [ "${RUNNER_VERSION}" = "latest" ] || [ -z "${RUNNER_VERSION}" ]; then

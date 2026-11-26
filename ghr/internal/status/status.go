@@ -28,8 +28,8 @@ type Disk struct {
 	SizeGB    float64  `json:"size_gb"`
 	BootStick bool     `json:"boot_stick"`
 	ReadOnly  bool     `json:"read_only"`
-	Mounted   []string `json:"mounted,omitempty"`  // mounted partitions/devices
-	Holders   []string `json:"holders,omitempty"`  // dm/md devices built on it
+	Mounted   []string `json:"mounted,omitempty"` // mounted partitions/devices
+	Holders   []string `json:"holders,omitempty"` // dm/md devices built on it
 	Swap      bool     `json:"swap"`
 	OK        bool     `json:"ok"` // host disk: read-only, unmounted, no holders, no swap
 }

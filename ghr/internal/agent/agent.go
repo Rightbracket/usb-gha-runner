@@ -32,14 +32,17 @@ import (
 const (
 	SocketPath  = "/run/ghr/agent.sock"
 	SocketGroup = "ghr-web"
-	// ImagesArchive holds ghr-job and registry:2, saved at image build time.
+	// ImagesArchive holds ghr-job and the registry image, saved at image build time.
 	ImagesArchive = "/run/live/medium/live/ghr-images.tar.zst"
 	VersionFile   = "/usr/share/ghr/version"
 	MirrorName    = "ghr-mirror"
-	MirrorImage   = "registry:2"
 	MirrorDir     = "/data/registry-mirror"
 	CacheFile     = config.RunDir + "/cache.json"
 )
+
+// MirrorImage is the registry image saved in ImagesArchive. build.sh sets it
+// from versions.env with -ldflags -X so the two can't drift apart.
+var MirrorImage = "registry:2.8.3"
 
 type Agent struct {
 	cfgMu     sync.Mutex // serialises config writes

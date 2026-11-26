@@ -36,10 +36,10 @@ func TestTarget(t *testing.T) {
 
 func TestAutoWorkers(t *testing.T) {
 	cases := []struct{ threads, memMB, want int }{
-		{16, 64 * 1024, 8},   // CPU bound
-		{16, 15800, 4},       // a "16 GB" box reads a bit under 16 GiB
+		{16, 64 * 1024, 8}, // CPU bound
+		{16, 15800, 4},     // a "16 GB" box reads a bit under 16 GiB
 		{4, 8 * 1024, 2},
-		{2, 2048, 1},         // never below 1
+		{2, 2048, 1},           // never below 1
 		{128, 1024 * 1024, 32}, // never above 32
 	}
 	for _, c := range cases {
