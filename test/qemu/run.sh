@@ -208,7 +208,8 @@ wait_down || { bad "did not power off"; kill "$(cat "$work/qemu.pid")" 2>/dev/nu
 
 log "host disks unchanged"
 if (cd disks && sha256sum -c --quiet SHA256SUMS); then ok "all fake host disks are byte-for-byte unchanged"; else bad "a host disk changed"; fi
-if sgdisk -p stick.img | grep -q GHR-DATA; then ok "GHR-DATA partition is on the stick"; else bad "no GHR-DATA on the stick"; fi
+if sgdisk -p stick.img | awk '$NF=="GHR-DATA"{f=1} END{exit !f}'; then ok "GHR-DATA partition is on the stick"; else bad "no GHR-DATA on the stick"; fi
+if sgdisk -p stick.img | awk '$NF=="GHR-DATA-NEW"{f=1} END{exit !f}'; then bad "GHR-DATA-NEW was never renamed"; else ok "no unfinished GHR-DATA-NEW left"; fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL CHECKS PASSED ($mode)"; else echo "$fails CHECK(S) FAILED ($mode)"; fi

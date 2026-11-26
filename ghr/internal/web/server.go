@@ -402,7 +402,7 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 		c.SlotMemoryMB = n
 	}
 	if c.NamePrefix != "" && !validName(c.NamePrefix) {
-		back(w, r, "/config", "", "Runner name may only use letters, digits, - and _.")
+		back(w, r, "/config", "", fmt.Sprintf("Name prefix may only use up to %d letters, digits, - and _.", config.MaxPrefix))
 		return
 	}
 	if err := s.call(r.Context(), "PUT", "/v1/config", c, nil); err != nil {
@@ -413,7 +413,7 @@ func (s *Server) postConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func validName(s string) bool {
-	if len(s) > 60 {
+	if len(s) > config.MaxPrefix {
 		return false
 	}
 	for _, c := range s {

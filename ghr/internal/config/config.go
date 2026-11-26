@@ -26,6 +26,9 @@ const (
 	SlotsDir    = "/run/ghr/slots"
 	HistoryPath = "/data/ghr/history.jsonl"
 	BootDiskRun = "/run/ghr/boot-disk"
+	// MaxPrefix keeps PREFIX-ghr-XXXX-<stick ID>-NN within GitHub's and
+	// Linux's 64-character limits.
+	MaxPrefix = 40
 	StickIDPath = "/data/etc/ghr/stick-id"
 	MaxWorkers  = 32
 )
@@ -142,6 +145,9 @@ func AutoWorkers(threads int, memMB int) int {
 func (c *Config) Validate() error {
 	if _, err := c.Target(); err != nil {
 		return err
+	}
+	if len(c.NamePrefix) > MaxPrefix || strings.Trim(c.NamePrefix, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != "" {
+		return fmt.Errorf("name prefix must be at most %d letters, digits, - or _", MaxPrefix)
 	}
 	w := strings.TrimSpace(strings.ToLower(c.Workers))
 	if w != "" && w != "auto" {

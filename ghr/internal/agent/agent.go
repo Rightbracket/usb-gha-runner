@@ -105,13 +105,26 @@ func Run(ctx context.Context) error {
 		Ready: func() bool { _, err := os.Stat(importer.PasswordFile); return err == nil },
 	}
 	a.sv = sv
+	svDone := make(chan struct{})
 	go func() {
+		defer close(svDone)
 		if err := sv.Run(ctx); err != nil {
 			log.Printf("supervisor: %v", err)
 		}
 	}()
 
-	return a.serve(ctx)
+	err = a.serve(ctx)
+	// Job containers belong to dockerd, not to this unit, so wait for the
+	// supervisor to stop them before exiting (stopping nftables also stops
+	// the agent, and no job may outlive the firewall). Stay under the unit's
+	// TimeoutStopSec=90.
+	select {
+	case <-svDone:
+	case <-time.After(60 * time.Second):
+		log.Printf("job slots did not stop in time; removing their containers")
+		stopSlots()
+	}
+	return err
 }
 
 func (a *Agent) serve(ctx context.Context) error {

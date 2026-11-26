@@ -288,7 +288,9 @@ func (s *slot) loop(ctx context.Context) {
 			// Drained while the JIT request was in flight: don't start a
 			// runner that could take a job, and make GitHub forget it.
 			dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_ = client.DeleteRunner(dctx, runner.ID)
+			if err := client.DeleteRunner(dctx, runner.ID); err != nil {
+				log.Printf("slot %d: delete unused runner %d: %v", s.n, runner.ID, err)
+			}
 			cancel()
 			return
 		}
@@ -352,7 +354,8 @@ var (
 func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, name, jit string, runnerID int64) (bool, error) {
 	args := []string{"run", "--rm", "--name", container,
 		"--runtime=" + Runtime,
-		"--hostname", name,
+		// The runner name can be longer than the 64-byte hostname limit.
+		"--hostname", container,
 		"--label", "ghr.slot=" + strconv.Itoa(s.n),
 		"--cpus", strconv.FormatFloat(s.cpus, 'f', 2, 64),
 		"--memory", strconv.Itoa(s.memMB) + "m",
@@ -406,9 +409,27 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 		}
 	}()
 
-	stop := func() { _ = exec.Command("docker", "stop", "-t", "30", container).Run() }
+	// docker stop fails while the container is still being created, so a
+	// stop that didn't take is retried until the container exits.
+	stop := func() bool { return exec.Command("docker", "stop", "-t", "30", container).Run() == nil }
 	drainCh := s.drain
 	ctxDone := ctx.Done()
+	var retry <-chan time.Time
+	stopping := false // shutting down: stop even a busy runner
+	draining := false
+	act := func() {
+		retry = nil
+		mu.Lock()
+		b := busy
+		mu.Unlock()
+		if b && !stopping {
+			s.write(SlotState{RunnerName: name, State: "draining", Job: job})
+			return // let the job finish
+		}
+		if !stop() {
+			retry = time.After(time.Second)
+		}
+	}
 	for {
 		select {
 		case err := <-waitErr:
@@ -419,18 +440,15 @@ func (s *slot) runContainer(ctx context.Context, client *gh.Client, container, n
 			}
 			return ranJob, nil
 		case <-ctxDone:
-			stop()
-			ctxDone = nil
+			ctxDone, stopping = nil, true
+			act()
 		case <-drainCh:
-			mu.Lock()
-			b := busy
-			mu.Unlock()
-			if !b {
-				stop() // idle: stop now; busy: let the job finish
-			} else {
-				s.write(SlotState{RunnerName: name, State: "draining", Job: job})
+			drainCh, draining = nil, true // a nil channel blocks forever
+			act()
+		case <-retry:
+			if draining || stopping {
+				act()
 			}
-			drainCh = nil // only react once; a nil channel blocks forever
 		}
 	}
 }

@@ -140,6 +140,25 @@ func TestRunnerBase(t *testing.T) {
 	}
 }
 
+func TestNamePrefixLimit(t *testing.T) {
+	c := &Config{URL: "https://github.com/acme", Workers: "auto", Auth: Auth{Type: "pat", PAT: "x"}}
+	c.NamePrefix = strings.Repeat("a", MaxPrefix)
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(c.RunnerBase("ghr-3456-0123abcd") + "-32"); n > 64 {
+		t.Fatalf("longest runner name is %d characters", n)
+	}
+	c.NamePrefix += "a"
+	if c.Validate() == nil {
+		t.Fatal("prefix over the limit accepted")
+	}
+	c.NamePrefix = "bad name"
+	if c.Validate() == nil {
+		t.Fatal("prefix with a space accepted")
+	}
+}
+
 func TestRunnerHostStable(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "etc", "stick-id")
 	a, err := RunnerHost("ghr-3456", p)

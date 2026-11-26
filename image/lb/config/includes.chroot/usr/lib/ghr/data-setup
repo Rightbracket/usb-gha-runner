@@ -2,7 +2,7 @@
 # Find the boot stick, create GHR-DATA in its free space on first boot, and
 # mount it at /data with the persistent folders bind-mounted into place.
 # Only the disk that holds the live medium is ever written.
-set -euo pipefail
+set -Eeuo pipefail # -E: the ERR trap below also fires inside functions
 RUN=/run/ghr
 mkdir -p "$RUN"
 rm -f "$RUN/data-error"
