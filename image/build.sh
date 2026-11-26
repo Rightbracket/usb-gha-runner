@@ -43,7 +43,7 @@ if [ "$sysbox_sha" != "${SYSBOX_SHA256:-}" ]; then
   echo "sysbox .deb SHA-256 is $sysbox_sha, versions.env has '${SYSBOX_SHA256:-}'" >&2
   pins_ok=false
 fi
-for v in JOB_BASE_IMAGE REGISTRY_IMAGE; do
+for v in BUILDER_IMAGE JOB_BASE_IMAGE REGISTRY_IMAGE; do
   ref=${!v}
   if [[ $ref != *@sha256:* ]]; then
     docker pull -q "$ref" >/dev/null
@@ -68,7 +68,7 @@ ls -lh "$out/ghr-images.tar.zst"
 
 log "stage live-build config"
 work=$(mktemp -d)
-cleanup() { docker run --rm -v "$work:/work" debian:"$DEBIAN_SUITE" rm -rf /work/lb >/dev/null 2>&1 || true; rm -rf "$work"; }
+cleanup() { docker run --rm -v "$work:/work" "$BUILDER_IMAGE" rm -rf /work/lb >/dev/null 2>&1 || true; rm -rf "$work"; }
 trap cleanup EXIT
 cp -a "$root/image/lb" "$work/lb"
 inc="$work/lb/config/includes.chroot"
@@ -79,6 +79,7 @@ mv "$out/sysbox.deb" "$inc/var/cache/ghr/sysbox.deb"
 {
   echo "version=$VERSION"
   echo "debian=$DEBIAN_SUITE"
+  echo "builder=$BUILDER_IMAGE"
   echo "actions_runner=$RUNNER_VERSION sha256=$RUNNER_SHA256"
   echo "sysbox=$SYSBOX_VERSION sha256=$sysbox_sha"
   echo "job_base=$JOB_BASE_IMAGE"
@@ -89,9 +90,9 @@ log "live-build and stick layout (this takes a while)"
 docker run --rm --privileged \
   -e DEBIAN_SUITE="$DEBIAN_SUITE" -e FAT_MB="$FAT_MB" \
   -v "$work:/work" -v "$root/image:/image:ro" -v "$out:/out" \
-  "debian:$DEBIAN_SUITE" /image/scripts/in-container.sh
+  "$BUILDER_IMAGE" /image/scripts/in-container.sh
 # Files from the container are root-owned.
-docker run --rm -v "$out:/out" "debian:$DEBIAN_SUITE" chown -R "$(id -u):$(id -g)" /out
+docker run --rm -v "$out:/out" "$BUILDER_IMAGE" chown -R "$(id -u):$(id -g)" /out
 
 log "compress"
 zstd -T0 -10 -q -f "$out/ghr-usb.img" -o "$out/ghr-usb.img.zst"

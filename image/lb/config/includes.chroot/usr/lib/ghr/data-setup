@@ -23,6 +23,10 @@ have=$(blkid -s UUID -o value "/dev/$bootpart" 2>/dev/null || true)
 if [ -n "$want" ] && [ "$want" != "$have" ]; then
   fail "boot partition /dev/$bootpart has UUID '$have', expected '$want'"
 fi
+if [ -n "$want" ]; then
+  n=$(blkid -t UUID="$want" -o device 2>/dev/null | wc -l)
+  [ "$n" -le 1 ] || fail "$n partitions have the boot UUID $want; remove the extra copy of this stick and reboot"
+fi
 disk=$(lsblk -ndo PKNAME "/dev/$bootpart")
 [ -n "$disk" ] || fail "can't find the disk that holds /dev/$bootpart"
 echo "$disk" >"$RUN/boot-disk"

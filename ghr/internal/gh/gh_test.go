@@ -208,13 +208,17 @@ func TestDeleteFollows307WithSameMethod(t *testing.T) {
 func TestJITFollows307WithBody(t *testing.T) {
 	var hops []string
 	var got map[string]any
+	var auth2 string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hops = append(hops, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
 		case "/api/v3/repos/acme/app/actions/runners/generate-jitconfig":
 			http.Redirect(w, r, "/api/v3/repositories/9/actions/runners/generate-jitconfig", http.StatusTemporaryRedirect)
 		case "/api/v3/repositories/9/actions/runners/generate-jitconfig":
-			json.NewDecoder(r.Body).Decode(&got)
+			auth2 = r.Header.Get("Authorization")
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode body on hop 2: %v", err)
+			}
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{"runner": map[string]any{"id": 42}, "encoded_jit_config": "ENC"})
 		default:
@@ -228,7 +232,14 @@ func TestJITFollows307WithBody(t *testing.T) {
 	if err != nil || enc != "ENC" || r.ID != 42 {
 		t.Fatalf("enc=%q runner=%+v err=%v hops=%v", enc, r, err, hops)
 	}
-	if len(hops) != 2 || !strings.HasPrefix(hops[1], "POST ") || got["name"] != "ghr-3456-0123abcd-1" {
-		t.Fatalf("hops=%v body=%v", hops, got)
+	if len(hops) != 2 || hops[1] != "POST /api/v3/repositories/9/actions/runners/generate-jitconfig" {
+		t.Fatalf("hops=%v", hops)
+	}
+	if auth2 != "Bearer tok" {
+		t.Errorf("Authorization on hop 2 = %q", auth2)
+	}
+	labels, _ := got["labels"].([]any)
+	if got["name"] != "ghr-3456-0123abcd-1" || got["runner_group_id"] != float64(1) || len(labels) != 1 || labels[0] != "self-hosted" {
+		t.Errorf("body on hop 2 = %v", got)
 	}
 }
