@@ -371,7 +371,7 @@ func stopSlots() {
 	out, _ := exec.Command("docker", "ps", "-aq", "--filter", "label=ghr.slot").Output()
 	ids := strings.Fields(string(out))
 	if len(ids) > 0 {
-		_ = exec.Command("docker", append([]string{"rm", "-f"}, ids...)...).Run()
+		_ = exec.Command("docker", append([]string{"rm", "-f", "-v"}, ids...)...).Run()
 	}
 }
 

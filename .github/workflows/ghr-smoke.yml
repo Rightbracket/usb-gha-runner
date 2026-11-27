@@ -1,0 +1,36 @@
+# Run by test/qemu/dispatch.sh during the QEMU test, on a runner that the
+# test registered with a one-off label. Nothing else targets that label, so
+# this never runs anywhere else.
+name: ghr-smoke
+run-name: ghr smoke ${{ inputs.label }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: Label of the QEMU test runner
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  services:
+    runs-on: [self-hosted, "${{ inputs.label }}"]
+    timeout-minutes: 15
+    services:
+      web:
+        image: nginx:alpine
+        ports: ["8080:80"]
+    steps:
+      - run: docker run --rm hello-world
+      - run: curl -fsS --retry 5 --retry-connrefused http://localhost:8080/ >/dev/null
+      - run: sudo -n true
+      - run: docker buildx version
+  container:
+    needs: services
+    runs-on: [self-hosted, "${{ inputs.label }}"]
+    timeout-minutes: 15
+    container: alpine:3.20
+    steps:
+      - run: test -f /etc/alpine-release && uname -m

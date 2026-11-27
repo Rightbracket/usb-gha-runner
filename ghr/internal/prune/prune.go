@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
 )
@@ -152,21 +154,34 @@ func run(ctx context.Context, args ...string) (string, error) {
 	out, err := execCmd(ctx, args[0], args[1:]...).CombinedOutput()
 	line := fmt.Sprintf("%v: ok", args)
 	if err != nil {
-		line = fmt.Sprintf("%v: %v: %s", args, err, lastLine(out))
+		line = fmt.Sprintf("%v: %v: %s", args, err, lastLines(out, 3, 500))
 	}
 	log.Print(line)
 	return line, err
 }
 
-func lastLine(b []byte) string {
-	s := string(b)
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
-		s = s[:len(s)-1]
-	}
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == '\n' {
-			return s[i+1:]
+// lastLines returns the last n non-empty lines of b joined with "; ", cut
+// to at most max bytes from the end. Docker prints the daemon's reason
+// before its generic "failed to start containers" line, so one isn't enough.
+func lastLines(b []byte, n, max int) string {
+	var keep []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\r", ""), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			keep = append(keep, l)
 		}
+	}
+	if len(keep) > n {
+		keep = keep[len(keep)-n:]
+	}
+	s := strings.Join(keep, "; ")
+	if len(s) > max {
+		// Keep the end, where docker puts the reason, and don't start
+		// inside a multi-byte character.
+		s = s[len(s)-(max-3):]
+		for len(s) > 0 && !utf8.RuneStart(s[0]) {
+			s = s[1:]
+		}
+		s = "..." + s
 	}
 	return s
 }

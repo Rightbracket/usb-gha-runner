@@ -1,10 +1,17 @@
 #!/bin/bash
 # Boot ghr-usb.img in QEMU with fake host disks attached and check that:
 #   1. the data partition is created on the stick only
-#   2. every host disk is read-only, unmounted, with no LVM/md/swap active
-#   3. (optional, with GHR_TEST_URL + GHR_TEST_PAT) a slot registers with GitHub
-#   4. after a reboot the password, certificate and data are still there
-#   5. the host disks are byte-for-byte unchanged afterwards
+#   2. every host disk is read-only, unmounted, with no LVM/md/swap active,
+#      including a disk hot-plugged after boot
+#   3. SSH works while the toggle is on and is refused once it is off
+#   4. the firewall is loaded, and a container can reach only the mirror
+#   5. the job image runs under Sysbox with its own Docker (hello-world,
+#      arm64 emulation, networks, buildx, Buildah, Podman)
+#   6. the agent replaces a mirror running an old image and keeps its cache
+#   7. (optional, with GHR_TEST_URL + GHR_TEST_PAT) a slot registers with
+#      GitHub and runs a dispatched workflow's jobs one after the other
+#   8. after a reboot the password, certificate and data are still there
+#   9. the host disks are byte-for-byte unchanged afterwards
 #
 # usage: run.sh <ghr-usb.img> <uefi|bios> [workdir]
 set -euo pipefail
@@ -14,108 +21,39 @@ work=${3:-$(mktemp -d)}
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$work"
 cd "$work"
+# shellcheck source=lib.sh
+. "$here/lib.sh"
 PASSWORD="qemu-test-password"
-PORT=${PORT:-8443}
-BASE="https://127.0.0.1:$PORT"
-jar=$work/cookies
-fails=0
-
-log() { printf '\n[%s] %s\n' "$(date +%T)" "$*"; }
-ok() { echo "  PASS: $*"; }
-bad() { echo "  FAIL: $*"; fails=$((fails + 1)); }
-c() { curl -sk --max-time 20 -b "$jar" -c "$jar" "$@"; }
 
 log "fake host disks"
 sudo "$here/fake-disks.sh" "$work/disks"
 sudo chown -R "$(id -u)" "$work/disks"
+# A fifth disk, plugged in only after boot.
+truncate -s 256M disks/hotplug.img
+mkfs.ext4 -q -F -L HOST-HOTPLUG disks/hotplug.img
+(cd disks && sha256sum hotplug.img >>SHA256SUMS)
 
 log "stick: copy of the image, grown to 64 GB (sparse)"
-cp --sparse=always "$img" stick.img
-truncate -s 64G stick.img
-# Send the guest's journal to the serial log, so a failed boot can be read
-# from CI output even if nothing reaches GHR-DATA.
-fat="stick.img@@$((2048 * 512))"
-for f in /boot/grub/grub.cfg /boot/syslinux/syslinux.cfg; do
-  mcopy -n -i "$fat" "::$f" boot.cfg
-  sed -i 's|console=ttyS0,115200n8 console=tty0|console=tty0 console=ttyS0,115200n8 systemd.journald.forward_to_console=1|' boot.cfg
-  grep -q forward_to_console boot.cfg || { echo "could not patch $f"; exit 1; }
-  mcopy -o -i "$fat" boot.cfg "::$f"
-done
-rm -f boot.cfg
-
-accel=tcg cpu=max
-if [ -w /dev/kvm ]; then accel=kvm cpu=host; fi
-fw=()
-if [ "$mode" = uefi ]; then
-  first() { for f in "$@"; do [ -e "$f" ] && { echo "$f"; return 0; }; done; return 1; }
-  code=$(first /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd) || { echo "OVMF not installed"; exit 1; }
-  vars=$(first /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd)
-  cp "$vars" vars.fd
-  fw=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=vars.fd")
-fi
+make_stick "$img" stick.img
+journal_to_serial stick.img
 
 boot() {
-  local n=$1
-  rm -f "$work/qemu.pid"
-  qemu-system-x86_64 -name ghr-test -machine "q35,accel=$accel" -cpu "$cpu" -smp 4 -m 8192 \
-    "${fw[@]}" -display none -daemonize -pidfile "$work/qemu.pid" \
-    -serial "file:serial-$mode-$n.log" -monitor "unix:$work/qemu.mon,server,nowait" \
-    -device qemu-xhci -drive if=none,id=stick,file=stick.img,format=raw,cache=unsafe \
-    -device usb-storage,drive=stick,bootindex=0 \
+  qemu_up "$1" stick.img \
     -drive if=none,id=d1,file=disks/ext4.img,format=raw -device virtio-blk-pci,drive=d1 \
     -device ahci,id=ahci -drive if=none,id=d2,file=disks/ntfs.img,format=raw -device ide-hd,drive=d2,bus=ahci.0 \
     -drive if=none,id=d3,file=disks/lvm-md.img,format=raw -device nvme,serial=ghrtest,drive=d3 \
-    -drive if=none,id=d4,file=disks/swap-gpt.img,format=raw -device virtio-blk-pci,drive=d4 \
-    -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:$PORT-:443"
+    -drive if=none,id=d4,file=disks/swap-gpt.img,format=raw -device virtio-blk-pci,drive=d4
 }
-wait_up() {
-  local limit=$1
-  for _ in $(seq "$limit"); do
-    c -o /dev/null -f "$BASE/api/health" && return 0
-    sleep 5
-  done
-  return 1
+
+ssh-keygen -q -t ed25519 -N '' -C ghr-qemu-test -f "$work/id_test"
+g() {
+  ssh -i "$work/id_test" -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR ghr@127.0.0.1 "$@"
 }
-wait_down() {
-  for _ in $(seq 120); do
-    [ -e "$work/qemu.pid" ] && kill -0 "$(cat "$work/qemu.pid")" 2>/dev/null || return 0
-    sleep 5
-  done
-  return 1
-}
-status() { c -f "$BASE/api/status"; }
-# After the VM has stopped, print the stick's journal from GHR-DATA (mounted
-# read-only) so a failed boot can be diagnosed from the CI log.
-dump_journal() {
-  local n=$1 start mnt
-  sgdisk -p stick.img | tail -n +8 || true
-  start=$(sgdisk -p stick.img | awk '$NF == "GHR-DATA" {print $2}')
-  if [ -z "$start" ]; then echo "  (no GHR-DATA partition, so no journal)"; return 0; fi
-  mnt=$(mktemp -d)
-  if sudo mount -o ro,loop,offset=$((start * 512)) stick.img "$mnt"; then
-    # shellcheck disable=SC2024 # the file is meant to be ours, not root's
-    sudo journalctl -D "$mnt/log/journal" --no-pager -o short-monotonic >"journal-$mode-$n.txt" 2>&1 || true
-    sudo find "$mnt/log/journal" -ls | head -n 20
-    head -n 3 "journal-$mode-$n.txt"
-    echo "  --- failed units and ghr services (full journal in journal-$mode-$n.txt) ---"
-    grep -E 'Failed|failed|ghr|sysbox|docker|error' "journal-$mode-$n.txt" | grep -v 'systemd-ssh-generator' | tail -n 150 || true
-    sudo umount "$mnt"
-  else
-    echo "  (could not mount GHR-DATA)"
-  fi
-  rmdir "$mnt"
-}
-# Ask the guest to shut down (ACPI power button) so its journal and GHR-DATA
-# are written out cleanly; kill it only if that doesn't work.
-stop_vm() {
-  echo system_powerdown | socat - "UNIX-CONNECT:$work/qemu.mon" >/dev/null 2>&1 || true
-  for _ in $(seq 36); do
-    [ -e "$work/qemu.pid" ] && kill -0 "$(cat "$work/qemu.pid")" 2>/dev/null || return 0
-    sleep 5
-  done
-  echo "  (guest did not power off; killing QEMU)"
-  kill "$(cat "$work/qemu.pid")" 2>/dev/null || true
-  sleep 5
+ssh_toggle() { # on|off
+  local args=(--data-urlencode "authorized_keys=$(cat "$work/id_test.pub")")
+  [ "$1" = on ] && args+=(-d enabled=on)
+  c -o /dev/null -w '%{redirect_url}' "${args[@]}" "$BASE/config/ssh"
 }
 
 log "boot 1 ($mode, $accel)"
@@ -123,9 +61,9 @@ boot 1
 if ! wait_up 180; then
   bad "web page never came up"
   echo "  --- guest log: ghr, failures and errors ---"
-  grep -aE 'ghr|[Ff]ailed|error|sysbox|docker' "serial-$mode-1.log" | grep -av ssh-generator | tail -n 200 || true
+  serial_errors "serial-$mode-1.log"
   stop_vm
-  dump_journal 1
+  dump_journal stick.img 1
   exit 1
 fi
 ok "web page is up"
@@ -151,10 +89,109 @@ jq -e '.disks_ok == true' <<<"$st" >/dev/null && ok "all host disks read-only, u
 jq -e '.builders.sysbox == "active"' <<<"$st" >/dev/null && ok "sysbox running" || bad "sysbox: $(jq -r .builders.sysbox <<<"$st")"
 jq -e '.builders.qemu | index("aarch64")' <<<"$st" >/dev/null && ok "QEMU aarch64 binfmt registered" || bad "qemu binfmt: $(jq -c .builders.qemu <<<"$st")"
 
+log "hot-plugged disk"
+monitor "drive_add 0 if=none,id=hp,file=$work/disks/hotplug.img,format=raw" >/dev/null
+monitor "device_add usb-storage,bus=xhci.0,drive=hp,id=hpdev,serial=GHRHOTPLUG" >/dev/null
+for _ in $(seq 24); do
+  st=$(status) && jq -e '[.disks[] | select(.boot_stick | not)] | length == 5' <<<"$st" >/dev/null && break
+  sleep 5
+done
+if jq -e '[.disks[] | select(.boot_stick | not)] | length == 5' <<<"$st" >/dev/null; then
+  ok "hot-plugged disk seen"
+  jq -e '[.disks[] | select(.boot_stick | not) | select(.read_only and .ok)] | length == 5' <<<"$st" >/dev/null &&
+    ok "hot-plugged disk is read-only like the others" || bad "after hot-plug: $(jq -c '[.disks[] | select(.boot_stick | not)]' <<<"$st")"
+else
+  bad "hot-plugged disk never appeared: $(jq -c '[.disks[].name]' <<<"$st")"
+fi
+
+log "SSH"
+loc=$(ssh_toggle on)
+[[ $loc != *err=* ]] && ok "SSH turned on" || bad "SSH toggle: $loc"
+for _ in $(seq 12); do g true 2>/dev/null && break; sleep 5; done
+if g true; then
+  ok "SSH login as ghr with the key"
+  [ "$(g sudo -n id -u || true)" = 0 ] && ok "ghr has sudo" || bad "ghr has no sudo"
+  [ "$(g 'lsblk -ndo SERIAL,RO' | awk '$1 == "GHRHOTPLUG" {print $2}')" = 1 ] && ok "hot-plugged disk is ro in the kernel" || bad "hot-plugged disk: $(g lsblk -ndo NAME,SERIAL,RO)"
+  ssh_ok=1
+else
+  bad "SSH login failed with the toggle on"
+  ssh_ok=0
+fi
+
+if [ "$ssh_ok" = 1 ]; then
+  log "firewall"
+  [ "$(g systemctl is-active nftables || true)" = active ] && ok "nftables is active" || bad "nftables: $(g systemctl status nftables --no-pager | tail -n 5)"
+  # Capture first: grep -q exiting early would SIGPIPE the ssh side under pipefail.
+  nft_ghr=$(g sudo nft list table inet ghr || true)
+  grep -q tcp_open <<<"$nft_ghr" && ok "table inet ghr is loaded" || bad "table inet ghr missing"
+  gw=$(g "docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}'" || true)
+  job=$(g "docker images --format '{{.Repository}}:{{.Tag}}' ghr-job" | head -n 1 || true)
+  mimg=$(g "docker inspect -f '{{.Config.Image}}' ghr-mirror" || true)
+  echo "  docker0 gateway $gw, job image $job, mirror image $mimg"
+  # Control: the ports answer from the host itself, so a timeout from a
+  # container is the firewall and not a closed port.
+  [ "$(g curl -sk -o /dev/null -w '%{http_code}' "https://$gw/api/health")" = 200 ] && ok "web page answers on $gw from the host" || bad "web page not listening on $gw"
+  probe() { # <url>: curl's exit code from a plain container on docker0
+    g "docker run --rm --entrypoint curl $job -sk -o /dev/null --max-time 5 $1; echo rc=\$?" | sed -n 's/^rc=//p'
+  }
+  [ "$(probe "http://$gw:5000/v2/")" = 0 ] && ok "container reaches the mirror on :5000" || bad "container can't reach the mirror"
+  rc=$(probe "https://$gw/api/health"); [ "$rc" = 28 ] && ok "container times out on the web page" || bad "container got curl exit $rc from the web page (want 28, timeout)"
+  # curl can't tell an open SSH port from a dropped one (sshd holds the
+  # connection either way), so for :22 test whether TCP connects at all.
+  tcp="5 bash -c 'exec 3<>/dev/tcp/$gw/22'; echo rc=\$?"
+  [ "$(g "timeout $tcp" | sed -n 's/^rc=//p')" = 0 ] && ok "SSH accepts TCP on $gw from the host" || bad "SSH not listening on $gw"
+  rc=$(g "docker run --rm --entrypoint timeout $job $tcp" | sed -n 's/^rc=//p')
+  [ "$rc" = 124 ] && ok "container times out connecting to SSH" || bad "container got exit $rc connecting to SSH (want 124, timeout)"
+
+  log "job image under sysbox-runc"
+  out=$(g "docker run --rm -i --runtime=sysbox-runc -e GHR_REGISTRY_MIRROR=http://$gw:5000 --entrypoint bash $job -s" <"$here/job-checks.sh" 2>&1) || true
+  grep '^CHECK' <<<"$out" >"job-checks-$mode.txt" || true
+  for name in dockerd hello-world binfmt arm64-emulation services-network container-exec buildx buildx-arm64 buildah podman qemu-system runner-sudo runner-docker runner-buildah runner-podman; do
+    line=$(grep "^CHECK $name: " <<<"$out" || true)
+    case $line in
+      *": ok") ok "job: $name" ;;
+      "") bad "job: $name did not run" ;;
+      *) bad "job: ${line#CHECK }" ;;
+    esac
+  done
+  if grep -q 'FAIL\|did not run' <<<"$(grep '^CHECK' <<<"$out")" || ! grep -q '^CHECK' <<<"$out"; then
+    echo "  --- job container output ---"; tail -n 40 <<<"$out"
+  fi
+
+  log "mirror upgrade"
+  blobs() { g "sudo find /data/registry-mirror -type f -path '*blobs*' | wc -l"; }
+  before=$(blobs || echo 0)
+  [ "$before" -gt 0 ] && ok "mirror cached $before blob files from the job's pulls" || bad "mirror cache is empty after the job pulled images"
+  want=$(g "docker image inspect -f '{{.Id}}' $mimg" || true)
+  # Stand-in for an older release: the same registry under another image ID,
+  # as an upgrade from a stick with an older REGISTRY_IMAGE would leave it.
+  g "printf 'FROM %s\nLABEL ghr.test=old-release\n' '$mimg' | docker build -q -t ghr-test/old-registry - >/dev/null" || bad "could not build the stand-in old registry image"
+  g "docker rm -f ghr-mirror >/dev/null && docker run -d --restart=always --name ghr-mirror --label ghr.keep=true \
+    -p $gw:5000:5000 -v /data/registry-mirror:/var/lib/registry -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io \
+    ghr-test/old-registry >/dev/null" || bad "could not start the old mirror"
+  old=$(g "docker inspect -f '{{.Image}}' ghr-mirror" || true)
+  [ -n "$old" ] && [ "$old" != "$want" ] && ok "mirror now runs the old image" || bad "old mirror not set up ($old)"
+  g sudo systemctl restart ghr-agent || bad "could not restart ghr-agent"
+  for _ in $(seq 36); do
+    [ "$(g docker inspect -f "'{{.State.Running}} {{.Image}}'" ghr-mirror 2>/dev/null)" = "true $want" ] && break
+    sleep 5
+  done
+  [ "$(g docker inspect -f "'{{.State.Running}} {{.Image}}'" ghr-mirror)" = "true $want" ] && ok "agent replaced the mirror with $mimg" || bad "mirror after agent restart: $(g docker inspect -f "'{{.State.Running}} {{.Image}}'" ghr-mirror)"
+  after=$(blobs || echo 0)
+  [ "$after" -ge "$before" ] && ok "mirror kept its cache ($after blob files)" || bad "mirror cache shrank from $before to $after"
+  g docker rmi ghr-test/old-registry >/dev/null || true
+
+  log "SSH off"
+  loc=$(ssh_toggle off)
+  [[ $loc != *err=* ]] && ok "SSH turned off" || bad "SSH toggle off: $loc"
+  if g true 2>/dev/null; then bad "SSH login still works with the toggle off"; else ok "SSH refused with the toggle off"; fi
+fi
+
 if [ -n "${GHR_TEST_URL:-}" ] && [ -n "${GHR_TEST_PAT:-}" ]; then
-  log "register with $GHR_TEST_URL"
+  label="qemu-test-$mode-${GITHUB_RUN_ID:-local}-$RANDOM"
+  log "register with $GHR_TEST_URL as $label"
   loc=$(c -o /dev/null -w '%{redirect_url}' --data-urlencode "url=$GHR_TEST_URL" -d workers=1 -d auth_type=pat \
-    --data-urlencode "pat=$GHR_TEST_PAT" --data-urlencode "labels=qemu-test-$mode" "$BASE/config")
+    --data-urlencode "pat=$GHR_TEST_PAT" --data-urlencode "labels=$label" "$BASE/config")
   [[ $loc != *err=* ]] && ok "config accepted" || bad "config rejected: $loc"
   for _ in $(seq 60); do
     st=$(status)
@@ -162,9 +199,16 @@ if [ -n "${GHR_TEST_URL:-}" ] && [ -n "${GHR_TEST_PAT:-}" ]; then
     sleep 10
   done
   [ "$(jq -r '.slots[0].state // ""' <<<"$st")" = idle ] && ok "slot 1 is listening for jobs" || bad "slot 1: $(jq -c '.slots' <<<"$st")"
+  if [[ ${GHR_TEST_URL#https://github.com/} == */* ]]; then
+    # Test this branch's ghr-smoke.yml when the test repo has the branch.
+    "$here/dispatch.sh" "$GHR_TEST_URL" "$label" "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" &&
+      ok "dispatched workflow ran both jobs on this runner" || bad "dispatched workflow failed"
+  else
+    echo "  SKIP: dispatching a workflow ($GHR_TEST_URL is not a repository URL)"
+  fi
   c -o /dev/null -X POST "$BASE/config/remove"
 else
-  echo "  SKIP: registration (set GHR_TEST_URL and GHR_TEST_PAT to run it)"
+  echo "  SKIP: registration and a real job (set GHR_TEST_URL and GHR_TEST_PAT to run them)"
 fi
 
 log "reboot"
@@ -173,9 +217,9 @@ c -o /dev/null -X POST "$BASE/actions/reboot"
 for _ in $(seq 60); do c -o /dev/null -f "$BASE/api/health" || break; sleep 2; done
 if ! wait_up 180; then
   bad "did not come back after reboot"
-  grep -aE 'ghr|[Ff]ailed|error|sysbox|docker' "serial-$mode-1.log" | grep -av ssh-generator | tail -n 200 || true
+  serial_errors "serial-$mode-1.log"
   stop_vm
-  dump_journal 2
+  dump_journal stick.img 2
   exit 1
 else
   ok "back after reboot"
@@ -199,18 +243,18 @@ else
   st=$(status || true); echo "$st" | jq . >"status-$mode-2.json" || true
   boot2=$(jq -r .machine.boot_id <<<"$st" 2>/dev/null || true)
   [ -n "$boot1" ] && [ -n "$boot2" ] && [ "$boot1" != "$boot2" ] && ok "it really rebooted (new boot id)" || bad "boot id unchanged or missing ($boot1 / $boot2)"
-  jq -e '.disks_ok == true' <<<"$st" >/dev/null && ok "host disks still protected" || bad "host disks after reboot"
+  jq -e '.disks_ok == true and ([.disks[] | select(.boot_stick | not) | select(.read_only and .ok)] | length == 5)' <<<"$st" >/dev/null &&
+    ok "all 5 host disks still protected (hot-plugged one included)" || bad "host disks after reboot: $(jq -c '[.disks[] | select(.boot_stick | not) | {name, read_only, ok}]' <<<"$st")"
+  if g true 2>/dev/null; then bad "SSH came back on after reboot"; else ok "SSH still off after reboot"; fi
 fi
 
 log "power off"
 c -o /dev/null -X POST "$BASE/actions/poweroff"
-wait_down || { bad "did not power off"; kill "$(cat "$work/qemu.pid")" 2>/dev/null || true; sleep 5; }
+wait_down || { bad "did not power off"; kill_vm; }
 
 log "host disks unchanged"
-if (cd disks && sha256sum -c --quiet SHA256SUMS); then ok "all fake host disks are byte-for-byte unchanged"; else bad "a host disk changed"; fi
-if sgdisk -p stick.img | awk '$NF=="GHR-DATA"{f=1} END{exit !f}'; then ok "GHR-DATA partition is on the stick"; else bad "no GHR-DATA on the stick"; fi
-if sgdisk -p stick.img | awk '$NF=="GHR-DATA-NEW"{f=1} END{exit !f}'; then bad "GHR-DATA-NEW was never renamed"; else ok "no unfinished GHR-DATA-NEW left"; fi
+if (cd disks && sha256sum -c --quiet SHA256SUMS); then ok "all fake host disks (hot-plugged one included) are byte-for-byte unchanged"; else bad "a host disk changed"; fi
+[ -n "$(part_start stick.img GHR-DATA)" ] && ok "GHR-DATA partition is on the stick" || bad "no GHR-DATA on the stick"
+[ -z "$(part_start stick.img GHR-DATA-NEW)" ] && ok "no unfinished GHR-DATA-NEW left" || bad "GHR-DATA-NEW was never renamed"
 
-echo
-if [ "$fails" -eq 0 ]; then echo "ALL CHECKS PASSED ($mode)"; else echo "$fails CHECK(S) FAILED ($mode)"; fi
-[ "$fails" -eq 0 ]
+finish "$mode"

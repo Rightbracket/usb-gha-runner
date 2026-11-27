@@ -248,15 +248,28 @@ func TestPruneStatusCodes(t *testing.T) {
 		{"ok", &prune.Result{BeforePct: 91, AfterPct: 40}, nil, 200, ""},
 	} {
 		ta := newTestAgent(t, f, nil)
-		var gotCtx context.Context
 		ta.prune = func(ctx context.Context, threshold float64) (*prune.Result, error) {
-			gotCtx = ctx
 			if threshold != 0 {
 				t.Errorf("%s: threshold %v, want 0 (always)", tc.name, threshold)
 			}
 			return tc.res, tc.err
 		}
-		w, out := ta.do(t, "POST", "/v1/prune", "")
+		// The web UI's request can time out; the prune must carry on.
+		reqCtx, cancel := context.WithCancel(context.Background())
+		var pruneErr error
+		inner := ta.prune
+		ta.prune = func(ctx context.Context, threshold float64) (*prune.Result, error) {
+			cancel()
+			pruneErr = ctx.Err()
+			return inner(ctx, threshold)
+		}
+		w := httptest.NewRecorder()
+		ta.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/prune", nil).WithContext(reqCtx))
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		if pruneErr != nil {
+			t.Errorf("%s: prune's context ended with the request: %v", tc.name, pruneErr)
+		}
 		if w.Code != tc.code {
 			t.Errorf("%s: %d %s, want %d", tc.name, w.Code, w.Body, tc.code)
 		}
@@ -265,9 +278,6 @@ func TestPruneStatusCodes(t *testing.T) {
 		}
 		if tc.code == 200 && out["after_pct"] != 40.0 {
 			t.Errorf("%s: body %v", tc.name, out)
-		}
-		if gotCtx != nil && gotCtx.Done() != nil {
-			t.Errorf("%s: prune got a cancellable context; it should outlive the request", tc.name)
 		}
 	}
 }

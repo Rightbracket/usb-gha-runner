@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeDocker replaces execCmd: it records each command and fails the ones
@@ -27,7 +28,8 @@ func fakeDocker(t *testing.T, fail ...string) *[]string {
 			onCmd(c)
 		}
 		if slices.Contains(fail, c) {
-			return exec.Command("false")
+			// Like docker: the daemon's reason first, then a generic line.
+			return exec.Command("sh", "-c", `echo "Error response from daemon: boom" >&2; echo "Error: failed to start containers: ghr-mirror" >&2; exit 1`)
 		}
 		return exec.Command("true")
 	}
@@ -101,19 +103,22 @@ func TestSecondPruneIsRefused(t *testing.T) {
 	unlock()
 	// Run holds the lock while its steps run.
 	var during []error
-	onCmd = func(string) {
-		if u, err := lock(); err == nil {
+	onCmd = func(c string) {
+		u, err := lock()
+		if err == nil {
 			u()
-		} else {
-			during = append(during, err)
+			t.Errorf("lock() succeeded during %q", c)
+		} else if !errors.Is(err, ErrBusy) {
+			t.Errorf("lock() during %q: %v, want ErrBusy", c, err)
 		}
+		during = append(during, err)
 	}
 	if _, err := Run(context.Background(), 0); err != nil {
 		t.Fatalf("Run after unlock: %v", err)
 	}
 	onCmd = nil
-	if len(during) != len(*ran) || len(during) == 0 || !errors.Is(during[0], ErrBusy) {
-		t.Errorf("lock() during %d steps: %v, want ErrBusy each time", len(*ran), during)
+	if len(during) != len(*ran) || len(during) == 0 {
+		t.Errorf("lock() tried during %d of %d steps", len(during), len(*ran))
 	}
 	// Run released the lock when it returned.
 	unlock, err = lock()
@@ -163,7 +168,7 @@ func TestMirrorRestartFailureIsReported(t *testing.T) {
 	fakeDocker(t, "docker start ghr-mirror")
 	fakeData(t, 90)
 	r, err := Run(context.Background(), 80)
-	if err == nil || !strings.Contains(err.Error(), "didn't start again") {
+	if err == nil || !strings.Contains(err.Error(), "didn't start again") || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err=%v, want the failed docker start", err)
 	}
 	if r == nil || !slices.ContainsFunc(r.Steps, func(s string) bool { return strings.Contains(s, "docker start ghr-mirror") }) {
@@ -195,5 +200,19 @@ func TestPruneClearsMirrorWhenStillFull(t *testing.T) {
 	}
 	if _, err := os.Stat(cache); !os.IsNotExist(err) {
 		t.Errorf("cache still there: %v", err)
+	}
+}
+
+func TestLastLinesCap(t *testing.T) {
+	// A long last line full of 3-byte characters, ending with the reason.
+	out := []byte("first\n" + strings.Repeat("é€", 300) + " reason: boom\n")
+	for max := 20; max < 30; max++ {
+		s := lastLines(out, 3, max)
+		if len(s) > max || !utf8.ValidString(s) || !strings.HasPrefix(s, "...") || !strings.HasSuffix(s, "reason: boom") {
+			t.Errorf("max %d: %q (%d bytes)", max, s, len(s))
+		}
+	}
+	if s := lastLines([]byte("a\n\nb\n"), 3, 500); s != "a; b" {
+		t.Errorf("short output: %q", s)
 	}
 }
