@@ -275,6 +275,23 @@ func (h *harness) fire(tm fakeTimer) {
 	tm.ch <- now
 }
 
+// waitDraining waits until the slot's state file says it is draining with
+// the given job, which act() writes when it leaves a busy runner alone.
+func (h *harness) waitDraining(job string) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(filepath.Join(h.s.parent.SlotsDir, "1.json"))
+		if strings.Contains(string(b), `"state":"draining"`) && strings.Contains(string(b), `"job":"`+job+`"`) {
+			return
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("slot never showed draining with job %q: %s", job, b)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (h *harness) stops() int { _, s, _ := h.docker.counts(); return s }
 
 // wait returns runContainer's result.
@@ -412,11 +429,14 @@ func TestDrainJobStartsDuringFailingDelete(t *testing.T) {
 		}
 		h.fire(tm)
 	}
-	// No timer follows: the slot now waits for the job to end.
+	// The busy re-check after the 7th DELETE is the only write of
+	// "draining" with the job name here (earlier ones ran before the job).
+	h.waitDraining("build")
+	// act() has returned without a timer: the slot waits for the job to end.
 	select {
 	case tm := <-h.timers:
 		t.Fatalf("scheduled a %s retry for a busy runner", tm.d)
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	h.c.say("2026-11-26 18:02:00Z: Job build completed with result: Succeeded")
 	h.c.exit(nil)
@@ -440,17 +460,7 @@ func TestDrainBusyRunnerFinishesJob(t *testing.T) {
 	h.c.say("2026-11-26 18:01:00Z: Running job: build")
 	h.s.startDrain()
 	// Only act()'s busy branch writes "draining" with the job name.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		b, _ := os.ReadFile(filepath.Join(h.s.parent.SlotsDir, "1.json"))
-		if strings.Contains(string(b), `"state":"draining"`) && strings.Contains(string(b), `"job":"build"`) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("drain never reached the busy runner: %s", b)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	h.waitDraining("build")
 	h.c.say("still building")
 	h.c.say("2026-11-26 18:02:00Z: Job build completed with result: Failed")
 	h.c.exit(nil)
@@ -473,6 +483,22 @@ func TestCancelStopsWithoutDelete(t *testing.T) {
 	}
 	if _, err := h.wait(); err == nil {
 		t.Error("want an error for a container stopped before a job")
+	}
+}
+
+// Shutting down stops even a busy runner, at once and without a DELETE,
+// so a long job can't hold up the agent's exit.
+func TestCancelStopsBusyRunner(t *testing.T) {
+	h := newHarness(t, nil)
+	h.start()
+	h.c.say("2026-11-26 18:01:00Z: Running job: build")
+	h.cancel()
+	tm := h.nextTimer()
+	if tm.d != time.Second || h.stops() != 1 || h.api.deleteCount() != 0 {
+		t.Errorf("retry=%s stops=%d DELETEs=%d, want 1s, 1, 0", tm.d, h.stops(), h.api.deleteCount())
+	}
+	if ran, err := h.wait(); !ran || err != nil {
+		t.Errorf("ranJob=%v err=%v, want a job and no error", ran, err)
 	}
 }
 
@@ -597,17 +623,21 @@ func TestRunRefillsAfterLabelChange(t *testing.T) {
 	for n := 1; n <= 2; n++ {
 		stop := fmt.Sprintf("stop ghr-slot-%d", n)
 		del := fmt.Sprintf("delete ghr-test-0123abcd-%d #", n)
-		seenDelete := false
+		seenDelete, found := false, false
 		for _, e := range events {
 			if strings.HasPrefix(e, del) {
 				seenDelete = true
 			}
 			if e == stop {
+				found = true
 				if !seenDelete {
 					t.Errorf("slot %d stopped before its runner was deleted: %v", n, events)
 				}
 				break
 			}
+		}
+		if !found {
+			t.Errorf("slot %d was never stopped: %v", n, events)
 		}
 	}
 }
@@ -615,9 +645,11 @@ func TestRunRefillsAfterLabelChange(t *testing.T) {
 // StopAll drains the slots itself, without waiting for Run's next poll.
 func TestStopAllDrains(t *testing.T) {
 	h := newRunHarness(t, true)
-	h.sv.poll = time.Hour // Run's first pass starts the slots; no later poll comes
-	h.save(workers(2))
-	h.run()
+	// No Run: StopAll's own drain is the only thing that can empty the slots.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.sv.slots = map[int]*slot{}
+	h.sv.reconcile(ctx, nil, workers(2))
 	h.waitFor("2 slots", func() bool { return h.live() == 2 })
 	if err := h.sv.StopAll(5 * time.Second); err != nil {
 		t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/gh"
@@ -74,6 +75,9 @@ type testAgent struct {
 	*Agent
 	path   string
 	killed int
+	// configuredAtStop is whether the saved config was still configured
+	// when remove asked the supervisor to stop every slot.
+	configuredAtStop []bool
 }
 
 func newTestAgent(t *testing.T, f *fakeGitHub, saved *config.Config) *testAgent {
@@ -85,6 +89,11 @@ func newTestAgent(t *testing.T, f *fakeGitHub, saved *config.Config) *testAgent 
 			return gh.NewWithTransport(c, f.srv.Client().Transport)
 		},
 		killSlots: func() { ta.killed++ },
+	}
+	ta.stopAll = func(time.Duration) error {
+		c, err := config.Load(ta.path)
+		ta.configuredAtStop = append(ta.configuredAtStop, err == nil && c.Configured())
+		return nil
 	}
 	if saved != nil {
 		if err := config.Save(ta.path, saved); err != nil {
@@ -181,6 +190,11 @@ func TestRemoveDeregistersOnlyThisMachine(t *testing.T) {
 	if strings.Join(f.deleted, ",") != "build-ghr-3f9a-0123abcd-1,build-ghr-3f9a-0123abcd-2" {
 		t.Errorf("deleted %v", f.deleted)
 	}
+	// The cleared config is saved before the slots are stopped, so the
+	// supervisor can't start new ones behind remove's back.
+	if len(ta.configuredAtStop) != 1 || ta.configuredAtStop[0] {
+		t.Errorf("StopAll calls (configured at the time): %v, want [false]", ta.configuredAtStop)
+	}
 	if ta.killed != 1 {
 		t.Errorf("slot containers removed %d times, want 1", ta.killed)
 	}
@@ -200,7 +214,7 @@ func TestRemoveReportsGitHubErrors(t *testing.T) {
 	if w.Code != 200 || out["ok"] != false || len(errs) != 1 || !strings.Contains(errs[0].(string), "500") {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	// The settings are cleared even so, and no slot restarts.
+	// The settings are cleared even so.
 	if c := ta.saved(t); c.Configured() {
 		t.Errorf("config still configured: %+v", c)
 	}

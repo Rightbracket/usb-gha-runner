@@ -6,10 +6,12 @@ package prune
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -35,10 +37,47 @@ func UsedPct(dir string) (float64, error) {
 	return 100 * (1 - float64(fs.Bavail)/float64(fs.Blocks)), nil
 }
 
+// ErrBusy is returned when another prune (the nightly one or "Prune now")
+// holds the lock.
+var ErrBusy = errors.New("a prune is already running")
+
+// lockPath is the cross-process lock that serialises prunes; tests move it.
+var lockPath = config.RunDir + "/prune.lock"
+
+// usedPct is UsedPct; tests replace it.
+var usedPct = UsedPct
+
+// lock takes the prune lock without waiting. The kernel drops it if the
+// process dies, so a crashed prune never leaves it held.
+func lock() (unlock func(), err error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrBusy
+		}
+		return nil, fmt.Errorf("prune lock: %w", err)
+	}
+	return func() { f.Close() }, nil // closing the file releases the lock
+}
+
 // Run prunes when /data is above threshold percent full. threshold <= 0
-// prunes unconditionally (the "Prune now" button).
+// prunes unconditionally (the "Prune now" button). Only one prune runs at a
+// time; a second one gets ErrBusy. Once ctx is cancelled no further step
+// starts, and the registry mirror is left alone.
 func Run(ctx context.Context, threshold float64) (*Result, error) {
-	before, err := UsedPct(config.DataDir)
+	unlock, err := lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	before, err := usedPct(config.DataDir)
 	if err != nil {
 		return nil, err
 	}
@@ -55,15 +94,24 @@ func Run(ctx context.Context, threshold float64) (*Result, error) {
 		{"podman", "system", "prune", "-af"},
 	}
 	for _, s := range steps {
+		if err := ctx.Err(); err != nil {
+			return r, err
+		}
 		line, _ := run(ctx, s...)
 		r.Steps = append(r.Steps, line)
 	}
-	// Still too full: drop the registry mirror's cached layers too.
-	if after, _ := UsedPct(config.DataDir); threshold > 0 && after >= threshold || threshold <= 0 {
-		r.Steps = append(r.Steps, clearMirror(ctx, mirrorCache)...)
+	if err := ctx.Err(); err != nil {
+		return r, err // stopped (SIGTERM): don't take the mirror down now
 	}
-	r.AfterPct, _ = UsedPct(config.DataDir)
-	return r, nil
+	// Still too full: drop the registry mirror's cached layers too.
+	var mirrorErr error
+	if after, _ := usedPct(config.DataDir); threshold > 0 && after >= threshold || threshold <= 0 {
+		var steps []string
+		steps, mirrorErr = clearMirror(ctx, mirrorCache)
+		r.Steps = append(r.Steps, steps...)
+	}
+	r.AfterPct, _ = usedPct(config.DataDir)
+	return r, mirrorErr
 }
 
 // mirrorCache holds the registry mirror's cached layers.
@@ -71,8 +119,9 @@ var mirrorCache = "/data/registry-mirror/docker"
 
 // clearMirror stops the mirror, deletes its cache and starts it again. Once
 // begun it runs to the end even if ctx is cancelled, so the mirror is never
-// left stopped, and the cache is deleted only after the stop succeeded.
-func clearMirror(ctx context.Context, dir string) []string {
+// left stopped, and the cache is deleted only after the stop succeeded. It
+// returns an error if the mirror didn't start again.
+func clearMirror(ctx context.Context, dir string) ([]string, error) {
 	ctx = context.WithoutCancel(ctx)
 	line, err := run(ctx, "docker", "stop", "ghr-mirror")
 	steps := []string{line}
@@ -83,8 +132,12 @@ func clearMirror(ctx context.Context, dir string) []string {
 	} else {
 		steps = append(steps, "cleared registry mirror cache")
 	}
-	line, _ = run(ctx, "docker", "start", "ghr-mirror")
-	return append(steps, line)
+	line, err = run(ctx, "docker", "start", "ghr-mirror")
+	steps = append(steps, line)
+	if err != nil {
+		return steps, fmt.Errorf("the registry mirror didn't start again after pruning (jobs pull from Docker Hub directly until it does): %w", err)
+	}
+	return steps, nil
 }
 
 // execCmd builds the commands that run executes; tests replace it.

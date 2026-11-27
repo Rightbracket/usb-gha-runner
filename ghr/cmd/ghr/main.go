@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -47,7 +48,11 @@ func main() {
 		over := fs.Float64("if-over", 0, "only prune when /data is at least this % full (0 = always)")
 		_ = fs.Parse(os.Args[2:])
 		var r *prune.Result
-		if r, err = prune.Run(ctx, *over); err == nil {
+		r, err = prune.Run(ctx, *over)
+		if errors.Is(err, prune.ErrBusy) {
+			log.Printf("%v; skipping this run", err)
+			err = nil
+		} else if err == nil {
 			if r.Skipped {
 				log.Printf("/data is %.0f%% full, under %.0f%%: nothing to do", r.BeforePct, *over)
 			} else {

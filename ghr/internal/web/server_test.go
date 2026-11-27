@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/auth"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
@@ -24,6 +25,8 @@ type fakeAgent struct {
 	config config.Config
 	ssh    config.SSH
 	calls  []string
+	// prune, when set, answers POST /v1/prune without holding mu.
+	prune http.HandlerFunc
 }
 
 func startFakeAgent(t *testing.T) (*fakeAgent, string) {
@@ -36,6 +39,10 @@ func startFakeAgent(t *testing.T) (*fakeAgent, string) {
 	fa := &fakeAgent{config: config.Config{Workers: "auto", Auth: config.Auth{Type: "app"}}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/prune" && fa.prune != nil {
+			fa.prune(w, r)
+			return
+		}
 		fa.mu.Lock()
 		defer fa.mu.Unlock()
 		fa.calls = append(fa.calls, r.Method+" "+r.URL.Path)
@@ -69,6 +76,12 @@ func startFakeAgent(t *testing.T) (*fakeAgent, string) {
 
 func newTestServer(t *testing.T) (*httptest.Server, *fakeAgent, *http.Client) {
 	t.Helper()
+	ts, fa, c, _ := newTestServerS(t)
+	return ts, fa, c
+}
+
+func newTestServerS(t *testing.T) (*httptest.Server, *fakeAgent, *http.Client, *Server) {
+	t.Helper()
 	fa, sock := startFakeAgent(t)
 	st := auth.NewStore(filepath.Join(t.TempDir(), "admin.json"))
 	s, err := New(st, sock, "test", "ghr-test", "AA:BB")
@@ -81,7 +94,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeAgent, *http.Client) {
 	c := ts.Client()
 	c.Jar = jar
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return ts, fa, c
+	return ts, fa, c, s
 }
 
 func post(t *testing.T, c *http.Client, u string, v url.Values) *http.Response {
@@ -254,5 +267,36 @@ func TestSetupLockedByBadPreset(t *testing.T) {
 	r := post(t, c, ts.URL+"/setup", url.Values{"password": {"attacker pw!"}, "confirm": {"attacker pw!"}})
 	if !strings.Contains(r.Header.Get("Location"), "Setup+is+locked") || s.Auth.HasPassword() {
 		t.Fatalf("setup not locked: %s", r.Header.Get("Location"))
+	}
+}
+
+func TestPruneMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent http.HandlerFunc
+		want  string
+	}{
+		{"slow prune", func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() },
+			"msg=Pruning+is+taking+a+while+and+continues+in+the+background"},
+		{"mirror restart failed", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(500)
+			io.WriteString(w, `{"error":"the registry mirror didn't start again after pruning"}`)
+		}, "err=the+registry+mirror+didn%27t+start+again"},
+		{"already running", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(409)
+			io.WriteString(w, `{"error":"a prune is already running; try again when it has finished"}`)
+		}, "err=a+prune+is+already+running"},
+		{"done", func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, `{"before_pct":91,"after_pct":40}`)
+		}, "msg=Pruned+caches%3A+%2Fdata+went+from+91%25+to+40%25+full."},
+	} {
+		ts, fa, c, s := newTestServerS(t)
+		fa.prune = tc.agent
+		s.agent.Timeout = 50 * time.Millisecond
+		post(t, c, ts.URL+"/setup", url.Values{"password": {"correct horse"}, "confirm": {"correct horse"}})
+		r := post(t, c, ts.URL+"/actions/prune", nil)
+		if loc := r.Header.Get("Location"); r.StatusCode != http.StatusSeeOther || !strings.Contains(loc, tc.want) {
+			t.Errorf("%s: %d %q, want %q", tc.name, r.StatusCode, loc, tc.want)
+		}
 	}
 }
