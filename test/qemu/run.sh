@@ -179,6 +179,8 @@ if [ "$ssh_ok" = 1 ]; then
   [ "$(g docker inspect -f "'{{.State.Running}} {{.Image}}'" ghr-mirror)" = "true $want" ] && ok "agent replaced the mirror with $mimg" || bad "mirror after agent restart: $(g docker inspect -f "'{{.State.Running}} {{.Image}}'" ghr-mirror)"
   after=$(blobs || echo 0)
   [ "$after" -ge "$before" ] && ok "mirror kept its cache ($after blob files)" || bad "mirror cache shrank from $before to $after"
+  src=$(g "docker inspect -f '{{range .Mounts}}{{if eq .Destination \"/var/lib/registry\"}}{{.Source}}{{end}}{{end}}' ghr-mirror" || true)
+  [ "$src" = /data/registry-mirror ] && ok "new mirror serves that cache" || bad "new mirror mounts '$src' at /var/lib/registry, not /data/registry-mirror"
   g docker rmi ghr-test/old-registry >/dev/null || true
 
   log "SSH off"
@@ -199,12 +201,12 @@ if [ -n "${GHR_TEST_URL:-}" ] && [ -n "${GHR_TEST_PAT:-}" ]; then
     sleep 10
   done
   [ "$(jq -r '.slots[0].state // ""' <<<"$st")" = idle ] && ok "slot 1 is listening for jobs" || bad "slot 1: $(jq -c '.slots' <<<"$st")"
-  if [[ ${GHR_TEST_URL#https://github.com/} == */* ]]; then
+  if [[ ${GHR_TEST_URL%/} =~ ^https://github\.com/[^/]+/[^/]+$ ]]; then
     # Test this branch's ghr-smoke.yml when the test repo has the branch.
-    "$here/dispatch.sh" "$GHR_TEST_URL" "$label" "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" &&
+    "$here/dispatch.sh" "${GHR_TEST_URL%/}" "$label" "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" &&
       ok "dispatched workflow ran both jobs on this runner" || bad "dispatched workflow failed"
   else
-    echo "  SKIP: dispatching a workflow ($GHR_TEST_URL is not a repository URL)"
+    echo "  SKIP: dispatching a workflow ($GHR_TEST_URL is not a github.com repository URL)"
   fi
   c -o /dev/null -X POST "$BASE/config/remove"
 else

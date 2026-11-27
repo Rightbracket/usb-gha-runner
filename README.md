@@ -9,9 +9,10 @@ and are never mounted.
 - Each job runs in its own throwaway [Sysbox](https://github.com/nestybox/sysbox)
   container with its own Docker daemon, so `services:`, `container:`, buildx,
   Buildah and Podman all work, and the job has root and passwordless sudo
-  inside that container only. Run Buildah and Podman with `sudo`: rootless
-  mode isn't set up, as Sysbox's ID map leaves no room for subordinate IDs. Job containers can't reach the stick's web
-  page or SSH, and no job runs until the web page has an admin password.
+  inside that container only. Run Buildah and Podman with `sudo`. Rootless
+  mode isn't set up, because Sysbox gives each container 65536 IDs, too few
+  for a full subordinate ID range. Job containers can't reach the stick's
+  web page or SSH, and no job runs until the web page has an admin password.
 - QEMU user-mode emulation is registered for arm64, arm/v7, riscv64, ppc64le
   and s390x, and `qemu-system-*` is available inside jobs.
 - Several jobs at once: `workers` is 1 to 32, or `auto` = min(CPU threads ÷ 2, RAM GB ÷ 4).
