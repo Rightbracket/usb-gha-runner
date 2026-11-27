@@ -106,5 +106,6 @@ tests run the job image under Sysbox without any credential (hello-world,
 arm64 emulation, networks, buildx, Buildah, Podman). To also run real jobs
 from GitHub, set the repository variable `GHR_TEST_URL` to this repository's
 URL and the secret `GHR_TEST_PAT` to a fine-grained token for it with
-*Administration* and *Actions* read and write: the test registers a runner
-with a one-off label and dispatches `.github/workflows/ghr-smoke.yml` to it.
+*Administration* and *Actions* read and write, and *Contents* read: the test
+registers a runner with a one-off label and dispatches
+`.github/workflows/ghr-smoke.yml` to it.

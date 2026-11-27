@@ -201,9 +201,10 @@ if [ -n "${GHR_TEST_URL:-}" ] && [ -n "${GHR_TEST_PAT:-}" ]; then
     sleep 10
   done
   [ "$(jq -r '.slots[0].state // ""' <<<"$st")" = idle ] && ok "slot 1 is listening for jobs" || bad "slot 1: $(jq -c '.slots' <<<"$st")"
-  if [[ ${GHR_TEST_URL%/} =~ ^https://github\.com/[^/]+/[^/]+$ ]]; then
+  u=${GHR_TEST_URL%/}; u=${u%.git}
+  if [[ $u =~ ^https://github\.com/[^/?#]+/[^/?#]+$ ]]; then
     # Test this branch's ghr-smoke.yml when the test repo has the branch.
-    "$here/dispatch.sh" "${GHR_TEST_URL%/}" "$label" "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" &&
+    "$here/dispatch.sh" "$u" "$label" "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" &&
       ok "dispatched workflow ran both jobs on this runner" || bad "dispatched workflow failed"
   else
     echo "  SKIP: dispatching a workflow ($GHR_TEST_URL is not a github.com repository URL)"

@@ -113,7 +113,10 @@ log "4. two copies of the image"
 make_stick "$img" s4.img
 journal_to_serial s4.img
 cp --sparse=always s4.img s4-copy.img
-gpt_before=$(sgdisk -p s4.img)
+# sgdisk -p with the file name normalized: the header (disk GUID, usable
+# sectors, free space) changes on data-setup's first write, sgdisk -e.
+gpt_norm() { sgdisk -p "$1" | sed "s|^Disk $1:|Disk STICK:|"; }
+gpt_before=$(gpt_norm s4.img)
 qemu_up 4 s4.img "${host_disk[@]}" \
   -drive if=none,id=copy,file=s4-copy.img,format=raw -device usb-storage,bus=xhci.0,drive=copy
 if wait_serial "serial-$mode-4.log" 'partitions have the boot UUID' 300; then
@@ -124,13 +127,12 @@ else
 fi
 stop_vm
 # Both sticks must keep the partition table they started with, readable.
-# sgdisk -p names the file, so compare from the partition list down.
 for s in s4.img s4-copy.img; do
-  if gpt=$(sgdisk -p "$s") && [ "$(sed -n '/^Number/,$p' <<<"$gpt")" = "$(sed -n '/^Number/,$p' <<<"$gpt_before")" ]; then
+  if gpt=$(gpt_norm "$s") && [ "$gpt" = "$gpt_before" ]; then
     ok "$s: partition table unchanged, no data partition"
   else
     bad "$s: partition table changed or unreadable"
-    echo "$gpt"
+    diff <(echo "$gpt_before") <(echo "$gpt") || true
   fi
 done
 host_unchanged "two copies"

@@ -20,8 +20,9 @@ if [ -n "$ref" ]; then
   code=$(gh_api -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$repo/commits/$ref" 2>/dev/null || true)
   case $code in
     200) ;;
-    404 | 422) echo "  $repo has no ref $ref, using its default branch"; ref="" ;;
-    *) echo "  looking up $ref in $repo failed (HTTP ${code:-none})" >&2; exit 1 ;;
+    404 | 422) echo "  ref $ref (or $repo itself) not found, trying the default branch"; ref="" ;;
+    000 | "") echo "  looking up $ref in $repo failed: no response" >&2; exit 1 ;;
+    *) echo "  looking up $ref in $repo failed: HTTP $code" >&2; exit 1 ;;
   esac
 fi
 [ -n "$ref" ] || ref=$(gh_api "https://api.github.com/repos/$repo" | jq -r .default_branch)
@@ -39,8 +40,11 @@ cleanup() {
   [ -z "$run" ] || gh_api -X POST "$api/runs/$run/cancel" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-gh_api -X POST "$api/workflows/ghr-smoke.yml/dispatches" \
-  -d "$(jq -nc --arg ref "$ref" --arg label "$label" '{ref: $ref, inputs: {label: $label}}')"
+# return_run_details makes GitHub answer with the new run's ID; lookup()
+# stays as the fallback for an older API or a lost response.
+resp=$(gh_api -X POST "$api/workflows/ghr-smoke.yml/dispatches" \
+  -d "$(jq -nc --arg ref "$ref" --arg label "$label" '{ref: $ref, inputs: {label: $label}, return_run_details: true}')")
+run=$(jq -r '.workflow_run_id // empty' <<<"$resp" 2>/dev/null || true)
 echo "  dispatched ghr-smoke.yml on $repo@$ref for $label"
 for _ in $(seq 120); do
   # API errors are retried on the next pass.
