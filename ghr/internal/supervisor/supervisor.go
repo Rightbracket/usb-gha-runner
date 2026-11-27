@@ -341,7 +341,7 @@ func (s *slot) loop(ctx context.Context) {
 		return
 	}
 	for !s.draining() && ctx.Err() == nil {
-		_ = s.parent.runDocker("rm", "-f", container)
+		_ = s.parent.runDocker("rm", "-f", "-v", container)
 		s.write(SlotState{RunnerName: name, State: "starting"})
 		jit, runner, err := s.jit(ctx, client, name)
 		if err != nil {

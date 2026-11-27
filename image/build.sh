@@ -28,7 +28,7 @@ fi
 [ -n "$RUNNER_SHA256" ] || { echo "no SHA-256 for actions/runner $RUNNER_VERSION" >&2; exit 1; }
 sysbox_url=$(gh_api "repos/nestybox/sysbox/releases/tags/v${SYSBOX_VERSION}" |
   jq -r '.assets[].browser_download_url | select(test("linux_amd64\\.deb$"))' | head -n1 || true)
-[ -n "$sysbox_url" ] || sysbox_url="https://downloads.nestybox.com/sysbox/releases/v${SYSBOX_VERSION}/sysbox-ce_${SYSBOX_VERSION}-0.linux_amd64.deb"
+[ -n "$sysbox_url" ] || sysbox_url="https://github.com/nestybox/sysbox/releases/download/v${SYSBOX_VERSION}/sysbox-ce_${SYSBOX_VERSION}.linux_amd64.deb"
 echo "actions/runner $RUNNER_VERSION ($RUNNER_SHA256)"
 echo "sysbox $SYSBOX_VERSION from $sysbox_url"
 

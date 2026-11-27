@@ -53,6 +53,14 @@ RUN test -n "${RUNNER_VERSION}" && test -n "${RUNNER_SHA256}" \
  && chown -R runner:runner /home/runner \
  && rm -rf /var/lib/apt/lists/*
 
+# Buildah and Podman use native overlay, not fuse-overlayfs (there is no
+# /dev/fuse in a Sysbox container). Overlay can't sit on the container's own
+# overlay root, so their storage is a volume; docker run --rm and rm -v
+# delete it with the job.
+RUN printf '[storage]\ndriver = "overlay"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' \
+      >/etc/containers/storage.conf
+VOLUME /var/lib/containers
+
 COPY entrypoint.sh /usr/local/bin/ghr-job-entrypoint
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/local/bin/ghr-job-entrypoint"]
