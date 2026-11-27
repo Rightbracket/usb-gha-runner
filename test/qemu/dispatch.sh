@@ -17,7 +17,10 @@ gh_api() {
 }
 if [ -n "$ref" ]; then
   # /commits resolves branches and tags. Only "not there" falls back.
-  code=$(gh_api -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$repo/commits/$ref" 2>/dev/null || true)
+  # Escape % and # for the URL (curl would drop a #fragment); the POST
+  # body below keeps the raw ref.
+  uref=${ref//%/%25}; uref=${uref//#/%23}
+  code=$(gh_api -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$repo/commits/$uref" 2>/dev/null || true)
   case $code in
     200) ;;
     404 | 422) echo "  ref $ref (or $repo itself) not found, trying the default branch"; ref="" ;;
@@ -41,7 +44,8 @@ cleanup() {
 }
 trap cleanup EXIT
 # return_run_details makes GitHub answer with the new run's ID; lookup()
-# stays as the fallback for an older API or a lost response.
+# is the fallback for a 204 or a response without it. A failed POST exits
+# here, and the EXIT trap's own lookup cancels a run it can already see.
 resp=$(gh_api -X POST "$api/workflows/ghr-smoke.yml/dispatches" \
   -d "$(jq -nc --arg ref "$ref" --arg label "$label" '{ref: $ref, inputs: {label: $label}, return_run_details: true}')")
 run=$(jq -r '.workflow_run_id // empty' <<<"$resp" 2>/dev/null || true)
