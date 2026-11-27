@@ -141,7 +141,7 @@ if [ "$ssh_ok" = 1 ]; then
   log "job image under sysbox-runc"
   out=$(g "docker run --rm -i --runtime=sysbox-runc -e GHR_REGISTRY_MIRROR=http://$gw:5000 --entrypoint bash $job -s" <"$here/job-checks.sh" 2>&1) || true
   grep '^CHECK' <<<"$out" >"job-checks-$mode.txt" || true
-  for name in dockerd hello-world arm64-emulation services-network container-exec buildx buildx-arm64 buildah podman qemu-system runner-sudo runner-docker; do
+  for name in dockerd hello-world binfmt arm64-emulation services-network container-exec buildx buildx-arm64 buildah podman qemu-system runner-sudo runner-docker; do
     line=$(grep "^CHECK $name: " <<<"$out" || true)
     case $line in
       *": ok") ok "job: $name" ;;

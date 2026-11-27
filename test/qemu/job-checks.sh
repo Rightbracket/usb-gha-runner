@@ -8,12 +8,16 @@ check() {
   local name=$1
   shift
   local out
-  if out=$("$@" 2>&1); then
+  # </dev/null: the script itself arrives on stdin (bash -s), and a command
+  # that reads stdin, like podman, would swallow the rest of it.
+  if out=$("$@" 2>&1 </dev/null); then
     echo "CHECK $name: ok"
   else
     echo "CHECK $name: FAIL $(tail -n 5 <<<"$out" | tr '\n' ' ')"
   fi
 }
+
+/usr/local/bin/ghr-binfmt
 
 mkdir -p /etc/docker
 if [ -n "${GHR_REGISTRY_MIRROR:-}" ]; then
@@ -24,7 +28,10 @@ for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
 check dockerd docker info
 
 check hello-world sh -c 'docker run --rm hello-world | grep -q "Hello from Docker"'
-check arm64-emulation sh -c 'm=$(docker run --rm --platform linux/arm64 alpine uname -m) && [ "$m" = aarch64 ] || { echo "uname -m: $m"; false; }'
+check binfmt sh -c 'ls /proc/sys/fs/binfmt_misc | grep -q "^qemu-aarch64" || { grep binfmt /proc/mounts; ls /proc/sys/fs/binfmt_misc; false; }'
+# arm64v8/alpine, not alpine: pulling alpine for arm64 would retag the
+# local alpine as arm64 and break the native checks after this one.
+check arm64-emulation sh -c 'm=$(docker run --rm --platform linux/arm64 arm64v8/alpine uname -m) && [ "$m" = aarch64 ] || { echo "uname -m: $m"; false; }'
 # services: and container: rely on user-defined networks with DNS, and on
 # docker exec into a long-running container.
 check services-network sh -c 'docker network create ghr-svc >/dev/null &&

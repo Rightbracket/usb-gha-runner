@@ -24,7 +24,7 @@ RUN apt-get update \
       build-essential pkg-config python3 python3-pip python3-venv \
       iptables iproute2 iputils-ping dnsutils kmod procps \
       buildah podman crun fuse-overlayfs uidmap \
-      qemu-system-x86 qemu-system-arm qemu-system-misc qemu-utils qemu-efi-aarch64 ovmf \
+      qemu-user-static qemu-system-x86 qemu-system-arm qemu-system-misc qemu-utils qemu-efi-aarch64 ovmf \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
  && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
@@ -61,6 +61,10 @@ RUN printf '[storage]\ndriver = "overlay"\nrunroot = "/run/containers/storage"\n
       >/etc/containers/storage.conf
 VOLUME /var/lib/containers
 
+# The job registers these itself (see binfmt.sh); fail the build if the
+# package stops shipping them.
+RUN ls /usr/lib/binfmt.d/qemu-aarch64*.conf
+COPY binfmt.sh /usr/local/bin/ghr-binfmt
 COPY entrypoint.sh /usr/local/bin/ghr-job-entrypoint
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/local/bin/ghr-job-entrypoint"]

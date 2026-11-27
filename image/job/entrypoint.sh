@@ -11,6 +11,8 @@ if [ -z "$jit" ]; then
   exit 2
 fi
 
+/usr/local/bin/ghr-binfmt
+
 mkdir -p /etc/docker
 if [ -n "${GHR_REGISTRY_MIRROR:-}" ]; then
   mirror_host="${GHR_REGISTRY_MIRROR#http://}"
