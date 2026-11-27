@@ -99,8 +99,21 @@ func TestSecondPruneIsRefused(t *testing.T) {
 		t.Fatalf("Run while locked: err=%v, ran %v", err, *ran)
 	}
 	unlock()
+	// Run holds the lock while its steps run.
+	var during []error
+	onCmd = func(string) {
+		if u, err := lock(); err == nil {
+			u()
+		} else {
+			during = append(during, err)
+		}
+	}
 	if _, err := Run(context.Background(), 0); err != nil {
 		t.Fatalf("Run after unlock: %v", err)
+	}
+	onCmd = nil
+	if len(during) != len(*ran) || len(during) == 0 || !errors.Is(during[0], ErrBusy) {
+		t.Errorf("lock() during %d steps: %v, want ErrBusy each time", len(*ran), during)
 	}
 	// Run released the lock when it returned.
 	unlock, err = lock()
@@ -155,6 +168,18 @@ func TestMirrorRestartFailureIsReported(t *testing.T) {
 	}
 	if r == nil || !slices.ContainsFunc(r.Steps, func(s string) bool { return strings.Contains(s, "docker start ghr-mirror") }) {
 		t.Errorf("steps %v", r)
+	}
+}
+
+// A box without a mirror container (stop and start both fail) is fine.
+func TestNoMirrorIsNotAnError(t *testing.T) {
+	fakeDocker(t, "docker stop ghr-mirror", "docker start ghr-mirror")
+	cache := fakeData(t, 90)
+	if _, err := Run(context.Background(), 0); err != nil {
+		t.Fatalf("err=%v, want nil without a mirror", err)
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Errorf("cache removed although the mirror didn't stop: %v", err)
 	}
 }
 

@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/gh"
+	"github.com/Rightbracket/usb-gha-runner/ghr/internal/prune"
 )
 
 // fakeGitHub answers the runner API for repo acme/app. Only the PAT "good"
@@ -226,5 +230,44 @@ func TestRemoveUnconfigured(t *testing.T) {
 	w, out := ta.do(t, "POST", "/v1/remove", "")
 	if w.Code != 200 || out["ok"] != true || f.requestCount() != 0 {
 		t.Fatalf("%d %s (GitHub requests %d)", w.Code, w.Body, f.requestCount())
+	}
+}
+
+func TestPruneStatusCodes(t *testing.T) {
+	f := newFakeGitHub(t)
+	for _, tc := range []struct {
+		name    string
+		res     *prune.Result
+		err     error
+		code    int
+		wantErr string
+	}{
+		{"busy", nil, prune.ErrBusy, 409, "a prune is already running"},
+		{"mirror down", &prune.Result{BeforePct: 91, AfterPct: 40}, errors.New("the registry mirror didn't start again"),
+			500, "/data went from 91% to 40% full, but the registry mirror didn't start again"},
+		{"ok", &prune.Result{BeforePct: 91, AfterPct: 40}, nil, 200, ""},
+	} {
+		ta := newTestAgent(t, f, nil)
+		var gotCtx context.Context
+		ta.prune = func(ctx context.Context, threshold float64) (*prune.Result, error) {
+			gotCtx = ctx
+			if threshold != 0 {
+				t.Errorf("%s: threshold %v, want 0 (always)", tc.name, threshold)
+			}
+			return tc.res, tc.err
+		}
+		w, out := ta.do(t, "POST", "/v1/prune", "")
+		if w.Code != tc.code {
+			t.Errorf("%s: %d %s, want %d", tc.name, w.Code, w.Body, tc.code)
+		}
+		if tc.wantErr != "" && !strings.Contains(fmt.Sprint(out["error"]), tc.wantErr) {
+			t.Errorf("%s: error %v, want %q", tc.name, out["error"], tc.wantErr)
+		}
+		if tc.code == 200 && out["after_pct"] != 40.0 {
+			t.Errorf("%s: body %v", tc.name, out)
+		}
+		if gotCtx != nil && gotCtx.Done() != nil {
+			t.Errorf("%s: prune got a cancellable context; it should outlive the request", tc.name)
+		}
 	}
 }

@@ -444,6 +444,9 @@ func TestDrainJobStartsDuringFailingDelete(t *testing.T) {
 	if !ran || err != nil {
 		t.Errorf("ranJob=%v err=%v", ran, err)
 	}
+	if n := len(h.timers); n != 0 {
+		t.Errorf("%d retries scheduled for a busy runner", n)
+	}
 	if h.stops() != 0 {
 		t.Errorf("stopped a runner with a job (%d stops)", h.stops())
 	}

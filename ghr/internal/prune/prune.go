@@ -53,7 +53,9 @@ func lock() (unlock func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	// 0600: flock works on any open descriptor, so a file others can open
+	// would let any local user hold the lock.
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -120,22 +122,23 @@ var mirrorCache = "/data/registry-mirror/docker"
 // clearMirror stops the mirror, deletes its cache and starts it again. Once
 // begun it runs to the end even if ctx is cancelled, so the mirror is never
 // left stopped, and the cache is deleted only after the stop succeeded. It
-// returns an error if the mirror didn't start again.
+// returns an error if it stopped the mirror and the mirror didn't start
+// again. A box without a mirror (ensureMirror allows that) is not an error.
 func clearMirror(ctx context.Context, dir string) ([]string, error) {
 	ctx = context.WithoutCancel(ctx)
-	line, err := run(ctx, "docker", "stop", "ghr-mirror")
+	line, stopErr := run(ctx, "docker", "stop", "ghr-mirror")
 	steps := []string{line}
-	if err != nil {
+	if stopErr != nil {
 		steps = append(steps, "kept registry mirror cache: the mirror didn't stop")
 	} else if err := os.RemoveAll(dir); err != nil {
 		steps = append(steps, "clear mirror: "+err.Error())
 	} else {
 		steps = append(steps, "cleared registry mirror cache")
 	}
-	line, err = run(ctx, "docker", "start", "ghr-mirror")
+	line, err := run(ctx, "docker", "start", "ghr-mirror")
 	steps = append(steps, line)
-	if err != nil {
-		return steps, fmt.Errorf("the registry mirror didn't start again after pruning (jobs pull from Docker Hub directly until it does): %w", err)
+	if err != nil && stopErr == nil {
+		return steps, fmt.Errorf("the registry mirror didn't start again after pruning, so jobs pull from Docker Hub directly until it does (%s)", line)
 	}
 	return steps, nil
 }

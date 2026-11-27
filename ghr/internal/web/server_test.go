@@ -292,7 +292,9 @@ func TestPruneMessages(t *testing.T) {
 	} {
 		ts, fa, c, s := newTestServerS(t)
 		fa.prune = tc.agent
-		s.agent.Timeout = 50 * time.Millisecond
+		if tc.name == "slow prune" {
+			s.agent.Timeout = 50 * time.Millisecond
+		}
 		post(t, c, ts.URL+"/setup", url.Values{"password": {"correct horse"}, "confirm": {"correct horse"}})
 		r := post(t, c, ts.URL+"/actions/prune", nil)
 		if loc := r.Header.Get("Location"); r.StatusCode != http.StatusSeeOther || !strings.Contains(loc, tc.want) {

@@ -59,6 +59,14 @@ type Agent struct {
 	newClient  func(*config.Config) (*gh.Client, error)
 	killSlots  func()
 	stopAll    func(time.Duration) error
+	prune      func(context.Context, float64) (*prune.Result, error)
+}
+
+func (a *Agent) runPrune(ctx context.Context, threshold float64) (*prune.Result, error) {
+	if a.prune != nil {
+		return a.prune(ctx, threshold)
+	}
+	return prune.Run(ctx, threshold)
 }
 
 func (a *Agent) stopAllSlots(timeout time.Duration) error {
@@ -212,12 +220,15 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/ssh", a.putSSH)
 	mux.HandleFunc("POST /v1/prune", func(w http.ResponseWriter, r *http.Request) {
 		// A prune can outlast the web UI's request; let it finish anyway.
-		res, err := prune.Run(context.WithoutCancel(r.Context()), 0)
+		res, err := a.runPrune(context.WithoutCancel(r.Context()), 0)
 		if errors.Is(err, prune.ErrBusy) {
 			httpErr(w, errors.New("a prune is already running; try again when it has finished"), 409)
 			return
 		}
 		if err != nil {
+			if res != nil && !res.Skipped {
+				err = fmt.Errorf("/data went from %.0f%% to %.0f%% full, but %w", res.BeforePct, res.AfterPct, err)
+			}
 			httpErr(w, err, 500)
 			return
 		}
