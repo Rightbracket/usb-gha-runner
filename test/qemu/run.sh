@@ -121,7 +121,9 @@ fi
 if [ "$ssh_ok" = 1 ]; then
   log "firewall"
   [ "$(g systemctl is-active nftables || true)" = active ] && ok "nftables is active" || bad "nftables: $(g systemctl status nftables --no-pager | tail -n 5)"
-  g sudo nft list table inet ghr | grep -q tcp_open && ok "table inet ghr is loaded" || bad "table inet ghr missing"
+  # Capture first: grep -q exiting early would SIGPIPE the ssh side under pipefail.
+  nft_ghr=$(g sudo nft list table inet ghr || true)
+  grep -q tcp_open <<<"$nft_ghr" && ok "table inet ghr is loaded" || bad "table inet ghr missing"
   gw=$(g "docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}'" || true)
   job=$(g "docker images --format '{{.Repository}}:{{.Tag}}' ghr-job" | head -n 1 || true)
   mimg=$(g "docker inspect -f '{{.Config.Image}}' ghr-mirror" || true)
