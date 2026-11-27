@@ -54,9 +54,10 @@ else
   tail -n 60 "serial-$mode-1.log"
 fi
 c -o /dev/null -f "$BASE/api/health" && bad "web page came up without the live medium" || ok "no web page"
-# Control: a KERN_NOTICE line that always appears, so the console does show
-# low-priority kernel messages.
-grep -aq 'Attached SCSI' "serial-$mode-1.log" && ok "kernel info messages reach the console" || bad "no 'Attached SCSI' line: the mount check below can't see mounts"
+# Control: a KERN_INFO line (usb-storage's, for the stick) that always
+# appears, so the console does show messages at the mount line's level.
+grep -aq 'USB Mass Storage device detected' "serial-$mode-1.log" && ok "KERN_INFO messages reach the console" ||
+  bad "no 'USB Mass Storage device detected' line: the mount check below can't see mounts"
 if grep -aE 'EXT4-fs \((vd|sd|nvme)[^)]*\): mounted' "serial-$mode-1.log"; then bad "a host filesystem was mounted"; else ok "no host filesystem mounted"; fi
 kill_vm
 host_unchanged "live medium missing"
@@ -112,6 +113,10 @@ log "4. two copies of the image"
 make_stick "$img" s4.img
 journal_to_serial s4.img
 cp --sparse=always s4.img s4-copy.img
+# sgdisk -p with the file name normalized: the header (disk GUID, usable
+# sectors, free space) changes on data-setup's first write, sgdisk -e.
+gpt_norm() { sgdisk -p "$1" | sed "s|^Disk $1:|Disk STICK:|"; }
+gpt_before=$(gpt_norm s4.img)
 qemu_up 4 s4.img "${host_disk[@]}" \
   -drive if=none,id=copy,file=s4-copy.img,format=raw -device usb-storage,bus=xhci.0,drive=copy
 if wait_serial "serial-$mode-4.log" 'partitions have the boot UUID' 300; then
@@ -121,8 +126,14 @@ else
   serial_errors "serial-$mode-4.log"
 fi
 stop_vm
+# Both sticks must keep the partition table they started with, readable.
 for s in s4.img s4-copy.img; do
-  [ -z "$(part_start "$s" GHR-DATA)" ] && [ -z "$(part_start "$s" GHR-DATA-NEW)" ] && ok "$s: no data partition created" || bad "$s got a data partition"
+  if gpt=$(gpt_norm "$s") && [ "$gpt" = "$gpt_before" ]; then
+    ok "$s: partition table unchanged, no data partition"
+  else
+    bad "$s: partition table changed or unreadable"
+    diff <(echo "$gpt_before") <(echo "$gpt") || true
+  fi
 done
 host_unchanged "two copies"
 
