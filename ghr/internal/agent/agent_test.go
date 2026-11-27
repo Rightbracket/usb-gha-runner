@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,9 +14,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/gh"
+	"github.com/Rightbracket/usb-gha-runner/ghr/internal/prune"
 )
 
 // fakeGitHub answers the runner API for repo acme/app. Only the PAT "good"
@@ -74,6 +79,9 @@ type testAgent struct {
 	*Agent
 	path   string
 	killed int
+	// configuredAtStop is whether the saved config was still configured
+	// when remove asked the supervisor to stop every slot.
+	configuredAtStop []bool
 }
 
 func newTestAgent(t *testing.T, f *fakeGitHub, saved *config.Config) *testAgent {
@@ -85,6 +93,11 @@ func newTestAgent(t *testing.T, f *fakeGitHub, saved *config.Config) *testAgent 
 			return gh.NewWithTransport(c, f.srv.Client().Transport)
 		},
 		killSlots: func() { ta.killed++ },
+	}
+	ta.stopAll = func(time.Duration) error {
+		c, err := config.Load(ta.path)
+		ta.configuredAtStop = append(ta.configuredAtStop, err == nil && c.Configured())
+		return nil
 	}
 	if saved != nil {
 		if err := config.Save(ta.path, saved); err != nil {
@@ -181,6 +194,11 @@ func TestRemoveDeregistersOnlyThisMachine(t *testing.T) {
 	if strings.Join(f.deleted, ",") != "build-ghr-3f9a-0123abcd-1,build-ghr-3f9a-0123abcd-2" {
 		t.Errorf("deleted %v", f.deleted)
 	}
+	// The cleared config is saved before the slots are stopped, so the
+	// supervisor can't start new ones behind remove's back.
+	if len(ta.configuredAtStop) != 1 || ta.configuredAtStop[0] {
+		t.Errorf("StopAll calls (configured at the time): %v, want [false]", ta.configuredAtStop)
+	}
 	if ta.killed != 1 {
 		t.Errorf("slot containers removed %d times, want 1", ta.killed)
 	}
@@ -200,7 +218,7 @@ func TestRemoveReportsGitHubErrors(t *testing.T) {
 	if w.Code != 200 || out["ok"] != false || len(errs) != 1 || !strings.Contains(errs[0].(string), "500") {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	// The settings are cleared even so, and no slot restarts.
+	// The settings are cleared even so.
 	if c := ta.saved(t); c.Configured() {
 		t.Errorf("config still configured: %+v", c)
 	}
@@ -212,5 +230,44 @@ func TestRemoveUnconfigured(t *testing.T) {
 	w, out := ta.do(t, "POST", "/v1/remove", "")
 	if w.Code != 200 || out["ok"] != true || f.requestCount() != 0 {
 		t.Fatalf("%d %s (GitHub requests %d)", w.Code, w.Body, f.requestCount())
+	}
+}
+
+func TestPruneStatusCodes(t *testing.T) {
+	f := newFakeGitHub(t)
+	for _, tc := range []struct {
+		name    string
+		res     *prune.Result
+		err     error
+		code    int
+		wantErr string
+	}{
+		{"busy", nil, prune.ErrBusy, 409, "a prune is already running"},
+		{"mirror down", &prune.Result{BeforePct: 91, AfterPct: 40}, errors.New("the registry mirror didn't start again"),
+			500, "/data went from 91% to 40% full, but the registry mirror didn't start again"},
+		{"ok", &prune.Result{BeforePct: 91, AfterPct: 40}, nil, 200, ""},
+	} {
+		ta := newTestAgent(t, f, nil)
+		var gotCtx context.Context
+		ta.prune = func(ctx context.Context, threshold float64) (*prune.Result, error) {
+			gotCtx = ctx
+			if threshold != 0 {
+				t.Errorf("%s: threshold %v, want 0 (always)", tc.name, threshold)
+			}
+			return tc.res, tc.err
+		}
+		w, out := ta.do(t, "POST", "/v1/prune", "")
+		if w.Code != tc.code {
+			t.Errorf("%s: %d %s, want %d", tc.name, w.Code, w.Body, tc.code)
+		}
+		if tc.wantErr != "" && !strings.Contains(fmt.Sprint(out["error"]), tc.wantErr) {
+			t.Errorf("%s: error %v, want %q", tc.name, out["error"], tc.wantErr)
+		}
+		if tc.code == 200 && out["after_pct"] != 40.0 {
+			t.Errorf("%s: body %v", tc.name, out)
+		}
+		if gotCtx != nil && gotCtx.Done() != nil {
+			t.Errorf("%s: prune got a cancellable context; it should outlive the request", tc.name)
+		}
 	}
 }

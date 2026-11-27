@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -47,12 +48,18 @@ func main() {
 		over := fs.Float64("if-over", 0, "only prune when /data is at least this % full (0 = always)")
 		_ = fs.Parse(os.Args[2:])
 		var r *prune.Result
-		if r, err = prune.Run(ctx, *over); err == nil {
-			if r.Skipped {
-				log.Printf("/data is %.0f%% full, under %.0f%%: nothing to do", r.BeforePct, *over)
-			} else {
-				log.Printf("/data went from %.0f%% to %.0f%% full", r.BeforePct, r.AfterPct)
-			}
+		r, err = prune.Run(ctx, *over)
+		switch {
+		case errors.Is(err, prune.ErrBusy):
+			log.Printf("%v; skipping this run", err)
+			err = nil
+		case errors.Is(err, context.Canceled):
+			log.Printf("stopped before finishing; the registry mirror was left alone")
+			err = nil
+		case r != nil && r.Skipped:
+			log.Printf("/data is %.0f%% full, under %.0f%%: nothing to do", r.BeforePct, *over)
+		case r != nil:
+			log.Printf("/data went from %.0f%% to %.0f%% full", r.BeforePct, r.AfterPct)
 		}
 	case "version":
 		fmt.Println(agent.Version())
