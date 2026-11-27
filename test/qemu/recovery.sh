@@ -64,7 +64,14 @@ dd if=/dev/urandom of=s2.img bs=512 seek="$(part_start s2.img GHR-DATA-NEW)" cou
 qemu_up 2 s2.img "${host_disk[@]}"
 if wait_up 180; then
   ok "web page is up"
-  st=$(status || echo '{}')
+  # The status API needs a login, so set the admin password first.
+  c -o /dev/null --data-urlencode "password=qemu-test-password" --data-urlencode "confirm=qemu-test-password" "$BASE/setup"
+  st='{}'
+  for _ in $(seq 24); do
+    st=$(status) && jq -e '.stick.data_total_gb' <<<"$st" >/dev/null && break
+    st='{}'
+    sleep 5
+  done
   jq -e '.stick.data_total_gb > 50' <<<"$st" >/dev/null && ok "GHR-DATA mounted ($(jq .stick.data_total_gb <<<"$st") GB)" || bad "data partition after recovery: $(jq -c .stick <<<"$st")"
 else
   bad "web page never came up"
