@@ -70,8 +70,11 @@ first partition, or re-flash and lose `/data`.
 4. Jobs run in Sysbox containers, which can't see host block devices.
 
 The status page lists every disk with its read-only flag and mounts, and the
-QEMU tests check that fake host disks with ext4, NTFS, LVM on mdraid and swap
-are byte-for-byte unchanged after boot, reboot and shutdown.
+QEMU tests check that fake host disks with ext4, NTFS, LVM on mdraid and swap,
+plus one hot-plugged after boot, are byte-for-byte unchanged after boot,
+reboot and shutdown. Recovery boots check that a missing live medium, an
+interrupted first boot, an unreadable `GHR-DATA` and a second copy of the
+stick all fail safe.
 
 ## Repository layout
 
@@ -82,7 +85,7 @@ are byte-for-byte unchanged after boot, reboot and shutdown.
 | `image/job/` | `ghr-job` image that each job runs in |
 | `image/scripts/` | live-build wrapper and the stick layout (`mkimage.sh`) |
 | `image/build.sh` | full build: binary, job image, live-build, stick image |
-| `test/qemu/` | boot tests with fake host disks |
+| `test/qemu/` | boot tests with fake host disks (`run.sh`) and recovery boots (`recovery.sh`) |
 | `versions.env` | pinned inputs (runner, Sysbox, base images) |
 
 ## Building
@@ -92,9 +95,14 @@ Needs Linux with Docker (privileged containers), Go 1.24+, curl, jq and zstd.
 ```
 make test          # Go unit tests
 make image         # out/ghr-usb.img and out/ghr-usb.img.zst
-make qemu-uefi     # boot tests (needs sudo, qemu-system-x86, ovmf, ntfs-3g, mdadm, lvm2)
+make qemu-uefi     # boot tests (needs sudo, qemu-system-x86, ovmf, ntfs-3g, mdadm, lvm2, socat, mtools)
+make qemu-recovery # recovery boots (qemu-system-x86, ovmf, gdisk, socat, mtools)
 ```
 
-CI (`.github/workflows/build.yml`) runs all three. To also test registration,
-set the repository variable `GHR_TEST_URL` (a test repo or org URL) and the
-secret `GHR_TEST_PAT`.
+CI (`.github/workflows/build.yml`) runs all of these, and weekly. The boot
+tests run the job image under Sysbox without any credential (hello-world,
+arm64 emulation, networks, buildx, Buildah, Podman). To also run real jobs
+from GitHub, set the repository variable `GHR_TEST_URL` to this repository's
+URL and the secret `GHR_TEST_PAT` to a fine-grained token for it with
+*Administration* and *Actions* read and write: the test registers a runner
+with a one-off label and dispatches `.github/workflows/ghr-smoke.yml` to it.
