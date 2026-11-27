@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rightbracket/usb-gha-runner/ghr/internal/config"
 )
@@ -174,7 +175,13 @@ func lastLines(b []byte, n, max int) string {
 	}
 	s := strings.Join(keep, "; ")
 	if len(s) > max {
-		s = "..." + s[len(s)-max:]
+		// Keep the end, where docker puts the reason, and don't start
+		// inside a multi-byte character.
+		s = s[len(s)-(max-3):]
+		for len(s) > 0 && !utf8.RuneStart(s[0]) {
+			s = s[1:]
+		}
+		s = "..." + s
 	}
 	return s
 }

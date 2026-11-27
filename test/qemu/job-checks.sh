@@ -49,3 +49,7 @@ check podman podman run --rm docker.io/library/alpine true
 check qemu-system qemu-system-aarch64 --version
 check runner-sudo runuser -u runner -- sudo -n true
 check runner-docker runuser -u runner -- docker info
+# Job steps run as runner. Rootless Podman/Buildah aren't set up (Sysbox's
+# 65536-ID map leaves no room for subordinate IDs), so steps use sudo.
+check runner-buildah runuser -u runner -- sudo -n buildah from -q docker.io/library/alpine
+check runner-podman runuser -u runner -- sudo -n podman run --rm docker.io/library/alpine true

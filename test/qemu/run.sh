@@ -136,12 +136,17 @@ if [ "$ssh_ok" = 1 ]; then
   }
   [ "$(probe "http://$gw:5000/v2/")" = 0 ] && ok "container reaches the mirror on :5000" || bad "container can't reach the mirror"
   rc=$(probe "https://$gw/api/health"); [ "$rc" = 28 ] && ok "container times out on the web page" || bad "container got curl exit $rc from the web page (want 28, timeout)"
-  rc=$(probe "telnet://$gw:22"); [ "$rc" = 28 ] && ok "container times out on SSH" || bad "container got curl exit $rc from SSH (want 28, timeout)"
+  # curl can't tell an open SSH port from a dropped one (sshd holds the
+  # connection either way), so for :22 test whether TCP connects at all.
+  tcp="5 bash -c 'exec 3<>/dev/tcp/$gw/22'; echo rc=\$?"
+  [ "$(g "timeout $tcp" | sed -n 's/^rc=//p')" = 0 ] && ok "SSH accepts TCP on $gw from the host" || bad "SSH not listening on $gw"
+  rc=$(g "docker run --rm --entrypoint timeout $job $tcp" | sed -n 's/^rc=//p')
+  [ "$rc" = 124 ] && ok "container times out connecting to SSH" || bad "container got exit $rc connecting to SSH (want 124, timeout)"
 
   log "job image under sysbox-runc"
   out=$(g "docker run --rm -i --runtime=sysbox-runc -e GHR_REGISTRY_MIRROR=http://$gw:5000 --entrypoint bash $job -s" <"$here/job-checks.sh" 2>&1) || true
   grep '^CHECK' <<<"$out" >"job-checks-$mode.txt" || true
-  for name in dockerd hello-world binfmt arm64-emulation services-network container-exec buildx buildx-arm64 buildah podman qemu-system runner-sudo runner-docker; do
+  for name in dockerd hello-world binfmt arm64-emulation services-network container-exec buildx buildx-arm64 buildah podman qemu-system runner-sudo runner-docker runner-buildah runner-podman; do
     line=$(grep "^CHECK $name: " <<<"$out" || true)
     case $line in
       *": ok") ok "job: $name" ;;
@@ -194,7 +199,13 @@ if [ -n "${GHR_TEST_URL:-}" ] && [ -n "${GHR_TEST_PAT:-}" ]; then
     sleep 10
   done
   [ "$(jq -r '.slots[0].state // ""' <<<"$st")" = idle ] && ok "slot 1 is listening for jobs" || bad "slot 1: $(jq -c '.slots' <<<"$st")"
-  "$here/dispatch.sh" "$GHR_TEST_URL" "$label" && ok "dispatched workflow ran both jobs on this runner" || bad "dispatched workflow failed"
+  if [[ ${GHR_TEST_URL#https://github.com/} == */* ]]; then
+    # Test this branch's ghr-smoke.yml when the test repo has the branch.
+    "$here/dispatch.sh" "$GHR_TEST_URL" "$label" "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}" &&
+      ok "dispatched workflow ran both jobs on this runner" || bad "dispatched workflow failed"
+  else
+    echo "  SKIP: dispatching a workflow ($GHR_TEST_URL is not a repository URL)"
+  fi
   c -o /dev/null -X POST "$BASE/config/remove"
 else
   echo "  SKIP: registration and a real job (set GHR_TEST_URL and GHR_TEST_PAT to run them)"
@@ -232,7 +243,8 @@ else
   st=$(status || true); echo "$st" | jq . >"status-$mode-2.json" || true
   boot2=$(jq -r .machine.boot_id <<<"$st" 2>/dev/null || true)
   [ -n "$boot1" ] && [ -n "$boot2" ] && [ "$boot1" != "$boot2" ] && ok "it really rebooted (new boot id)" || bad "boot id unchanged or missing ($boot1 / $boot2)"
-  jq -e '.disks_ok == true' <<<"$st" >/dev/null && ok "host disks still protected (hot-plugged one included)" || bad "host disks after reboot"
+  jq -e '.disks_ok == true and ([.disks[] | select(.boot_stick | not) | select(.read_only and .ok)] | length == 5)' <<<"$st" >/dev/null &&
+    ok "all 5 host disks still protected (hot-plugged one included)" || bad "host disks after reboot: $(jq -c '[.disks[] | select(.boot_stick | not) | {name, read_only, ok}]' <<<"$st")"
   if g true 2>/dev/null; then bad "SSH came back on after reboot"; else ok "SSH still off after reboot"; fi
 fi
 

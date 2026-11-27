@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeDocker replaces execCmd: it records each command and fails the ones
@@ -199,5 +200,19 @@ func TestPruneClearsMirrorWhenStillFull(t *testing.T) {
 	}
 	if _, err := os.Stat(cache); !os.IsNotExist(err) {
 		t.Errorf("cache still there: %v", err)
+	}
+}
+
+func TestLastLinesCap(t *testing.T) {
+	// A long last line full of 3-byte characters, ending with the reason.
+	out := []byte("first\n" + strings.Repeat("é€", 300) + " reason: boom\n")
+	for max := 20; max < 30; max++ {
+		s := lastLines(out, 3, max)
+		if len(s) > max || !utf8.ValidString(s) || !strings.HasPrefix(s, "...") || !strings.HasSuffix(s, "reason: boom") {
+			t.Errorf("max %d: %q (%d bytes)", max, s, len(s))
+		}
+	}
+	if s := lastLines([]byte("a\n\nb\n"), 3, 500); s != "a; b" {
+		t.Errorf("short output: %q", s)
 	}
 }

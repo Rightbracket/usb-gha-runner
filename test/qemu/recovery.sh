@@ -43,6 +43,9 @@ log "1. live medium missing ($mode, $accel)"
 make_stick "$img" s1.img
 journal_to_serial s1.img
 patch_boot s1.img 's|live-media=/dev/disk/by-uuid/[^ ]*|live-media=/dev/disk/by-uuid/0000-0000|g'
+# ext4's "mounted filesystem" line is KERN_INFO, which quiet keeps off the
+# serial console, and this boot never gets as far as journald.
+patch_boot s1.img 's| quiet| ignore_loglevel|g'
 qemu_up 1 s1.img "${host_disk[@]}"
 if wait_serial "serial-$mode-1.log" 'Unable to find a medium' 300; then
   ok "live-boot gave up: $(grep -am1 'Unable to find a medium' "serial-$mode-1.log" | tr -d '\r')"
@@ -51,6 +54,9 @@ else
   tail -n 60 "serial-$mode-1.log"
 fi
 c -o /dev/null -f "$BASE/api/health" && bad "web page came up without the live medium" || ok "no web page"
+# Control: a KERN_NOTICE line that always appears, so the console does show
+# low-priority kernel messages.
+grep -aq 'Attached SCSI' "serial-$mode-1.log" && ok "kernel info messages reach the console" || bad "no 'Attached SCSI' line: the mount check below can't see mounts"
 if grep -aE 'EXT4-fs \((vd|sd|nvme)[^)]*\): mounted' "serial-$mode-1.log"; then bad "a host filesystem was mounted"; else ok "no host filesystem mounted"; fi
 kill_vm
 host_unchanged "live medium missing"
